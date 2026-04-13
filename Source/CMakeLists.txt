@@ -310,6 +310,8 @@ target_sources(BespokeSynth PRIVATE
     LiveGranulator.h
     LocationZoomer.cpp
     LocationZoomer.h
+    LocationRecaller.cpp
+    LocationRecaller.h
     LockFreeQueue.h
     LoopStorer.cpp
     LoopStorer.h
