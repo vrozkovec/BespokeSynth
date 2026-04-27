@@ -936,13 +936,20 @@ void MidiController::Poll()
             {
                float realValue = uicontrol->GetValue();
                int outVal = 0;
-               if (!connection->mFeedbackValues.empty())
+               if (connection->mIncrementAmount != 0)
                {
-                  int idx = (int)roundf(realValue);
-                  if (idx >= 0 && idx < (int)connection->mFeedbackValues.size())
-                     outVal = connection->mFeedbackValues[idx];
-                  else if (idx >= (int)connection->mFeedbackValues.size())
-                     outVal = connection->mFeedbackValues.back();
+                  if (!connection->mFeedbackValues.empty())
+                  {
+                     int idx = (int)roundf(realValue);
+                     if (idx >= 0 && idx < (int)connection->mFeedbackValues.size())
+                        outVal = connection->mFeedbackValues[idx];
+                     else if (idx >= (int)connection->mFeedbackValues.size())
+                        outVal = connection->mFeedbackValues.back();
+                  }
+                  else
+                  {
+                     outVal = 0;
+                  }
                }
                else
                {
@@ -2744,10 +2751,10 @@ void UIControlConnection::CreateUIControls(int index)
    mBlinkCheckbox = new Checkbox(mUIOwner, "blink", mScaleOutputCheckbox, kAnchor_Right, &mBlink);
    mPagelessCheckbox = new Checkbox(mUIOwner, "pageless", mBlinkCheckbox, kAnchor_Right, &mPageless);
    m14BitModeCheckbox = new Checkbox(mUIOwner, "14bit", mPagelessCheckbox, kAnchor_Right, &m14BitMode);
-   mFeedbackValuesEntry = new TextEntry(mUIOwner, "fbvals", -1, -1, 15, mFeedbackValuesInput);
-   mFeedbackValuesEntry->PositionTo(m14BitModeCheckbox, kAnchor_Right);
-   mRemoveButton = new ClickButton(mUIOwner, " x ", mFeedbackValuesEntry, kAnchor_Right);
+   mRemoveButton = new ClickButton(mUIOwner, " x ", m14BitModeCheckbox, kAnchor_Right);
    mCopyButton = new ClickButton(mUIOwner, "copy", mRemoveButton, kAnchor_Right);
+   mFeedbackValuesEntry = new TextEntry(mUIOwner, "fbvals", -1, -1, 15, mFeedbackValuesInput);
+   mFeedbackValuesEntry->PositionTo(mFeedbackDropdown, kAnchor_Right);
    ++sControlID;
 
    mEditorControls.push_back(mMessageTypeDropdown);
@@ -2765,9 +2772,9 @@ void UIControlConnection::CreateUIControls(int index)
    mEditorControls.push_back(mFeedbackDropdown);
    mEditorControls.push_back(mPagelessCheckbox);
    mEditorControls.push_back(m14BitModeCheckbox);
-   mEditorControls.push_back(mFeedbackValuesEntry);
    mEditorControls.push_back(mRemoveButton);
    mEditorControls.push_back(mCopyButton);
+   mEditorControls.push_back(mFeedbackValuesEntry);
 
    for (auto iter = mEditorControls.begin(); iter != mEditorControls.end(); ++iter)
    {
@@ -2871,7 +2878,13 @@ void UIControlConnection::PreDraw()
    mValueEntry->SetShowing((mType == kControlType_SetValue || mType == kControlType_SetValueOnRelease) && mIncrementAmount == 0);
    m14BitModeCheckbox->SetShowing(mMessageType == kMidiMessage_Control && mControl >= 32);
    mIncrementalEntry->SetShowing(mType == kControlType_Slider || mType == kControlType_SetValue || mType == kControlType_SetValueOnRelease);
-   mFeedbackValuesEntry->SetShowing((mType == kControlType_SetValue || mType == kControlType_SetValueOnRelease) && mIncrementAmount != 0);
+
+   bool showIndividualFeedbackValues = (mType == kControlType_SetValue || mType == kControlType_SetValueOnRelease) && mIncrementAmount != 0;
+   mMidiOffEntry->SetShowing(!showIndividualFeedbackValues);
+   mMidiOnEntry->SetShowing(!showIndividualFeedbackValues);
+   mScaleOutputCheckbox->SetShowing(!showIndividualFeedbackValues);
+   mBlinkCheckbox->SetShowing(!showIndividualFeedbackValues);
+   mFeedbackValuesEntry->SetShowing(showIndividualFeedbackValues);
 }
 
 void UIControlConnection::DrawList(int index)
@@ -2896,6 +2909,8 @@ void UIControlConnection::DrawList(int index)
    for (auto iter = mEditorControls.begin(); iter != mEditorControls.end(); ++iter)
    {
       (*iter)->SetPosition(x, y);
+      if (*iter == mFeedbackValuesEntry)
+         mFeedbackValuesEntry->SetPosition(mMidiOffEntry->GetPosition(K(local)).x, mMidiOffEntry->GetPosition(K(local)).y);
       (*iter)->Draw();
 
       x += (*iter)->GetRect().width + 3;
@@ -2948,9 +2963,9 @@ void UIControlConnection::DrawLayout()
    mFeedbackDropdown->PositionTo(mTwoWayCheckbox, kAnchor_Right_Padded);
    mPagelessCheckbox->PositionTo(mTwoWayCheckbox, kAnchor_Below);
    m14BitModeCheckbox->PositionTo(mPagelessCheckbox, kAnchor_Right);
-   mFeedbackValuesEntry->PositionTo(mPagelessCheckbox, kAnchor_Below);
-   mRemoveButton->PositionTo(mFeedbackValuesEntry, kAnchor_Below);
+   mRemoveButton->PositionTo(mPagelessCheckbox, kAnchor_Below);
    mCopyButton->SetShowing(false);
+   mFeedbackValuesEntry->PositionTo(mControlTypeDropdown, kAnchor_Below);
 
    if (mControl < 32)
       m14BitModeCheckbox->SetShowing(false);
