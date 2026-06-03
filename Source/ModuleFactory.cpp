@@ -206,6 +206,7 @@
 #include "NotePanRandom.h"
 #include "PulseGate.h"
 #include "PulseHocket.h"
+#include "PulseQuantize.h"
 #include "Push2Control.h"
 #include "PulseTrain.h"
 #include "NoteLatch.h"
@@ -441,6 +442,7 @@ ModuleFactory::ModuleFactory()
    REGISTER(NotePanRandom, notepanrandom, kModuleCategory_Note);
    REGISTER(PulseGate, pulsegate, kModuleCategory_Pulse);
    REGISTER(PulseHocket, pulsehocket, kModuleCategory_Pulse);
+   REGISTER(PulseQuantize, pulsequantize, kModuleCategory_Pulse);
    REGISTER(Push2Control, push2control, kModuleCategory_Other);
    REGISTER(PulseTrain, pulsetrain, kModuleCategory_Pulse);
    REGISTER(NoteLatch, notelatch, kModuleCategory_Note);
