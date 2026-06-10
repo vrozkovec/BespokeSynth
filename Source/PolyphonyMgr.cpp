@@ -53,13 +53,39 @@ int PolyphonyMgr::Start(double time, int pitch, float amount, int voiceIdx, Modu
 
    if (voiceIdx == -1) //need a new voice
    {
+      // deduplicate: if a voice already plays this pitch, reuse it
       for (int i = 0; i < mVoiceLimit; ++i)
       {
-         int check = (i + mLastVoice + 1) % mVoiceLimit; //try to keep incrementing through list to allow old voices to finish
-         if (mVoices[check].mPitch == -1)
+         if (mVoices[i].mPitch == pitch && mVoices[i].mNoteOn)
          {
-            voiceIdx = check;
+            voiceIdx = i;
             break;
+         }
+      }
+
+      if (voiceIdx == -1)
+      {
+         for (int i = 0; i < mVoiceLimit; ++i)
+         {
+            int check = (i + mLastVoice + 1) % mVoiceLimit; //try to keep incrementing through list to allow old voices to finish
+            if (mVoices[check].mPitch == -1)
+            {
+               voiceIdx = check;
+               break;
+            }
+         }
+      }
+   }
+
+   if (voiceIdx == -1) //no free voice, try to reuse a voice in release
+   {
+      double oldest = std::numeric_limits<double>::max();
+      for (int i = 0; i < mVoiceLimit; ++i)
+      {
+         if (!mVoices[i].mNoteOn && mVoices[i].mPitch != -1 && mVoices[i].mTime < oldest)
+         {
+            oldest = mVoices[i].mTime;
+            voiceIdx = i;
          }
       }
    }
