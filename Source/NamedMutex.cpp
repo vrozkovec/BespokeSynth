@@ -25,37 +25,42 @@
 
 #include "NamedMutex.h"
 
-void NamedMutex::Lock(std::string locker)
+//the "locker" names exist for call-site context and debugging; ownership tracking is left
+//entirely to the underlying recursive mutex (the old name-string comparison was a data race)
+void NamedMutex::Lock(std::string /*locker*/)
 {
-   if (mLocker == locker)
-   {
-      ++mExtraLockCount;
-      return;
-   }
    mMutex.lock();
-   mLocker = locker;
+}
+
+bool NamedMutex::TryLock(std::string /*locker*/)
+{
+   return mMutex.try_lock();
 }
 
 void NamedMutex::Unlock()
 {
-   if (mExtraLockCount == 0)
-   {
-      mLocker = "<none>";
-      mMutex.unlock();
-   }
-   else
-   {
-      --mExtraLockCount;
-   }
+   mMutex.unlock();
 }
 
 ScopedMutex::ScopedMutex(NamedMutex* mutex, std::string locker)
 : mMutex(mutex)
 {
-   mMutex->Lock(locker);
+   mMutex->Lock(std::move(locker));
 }
 
 ScopedMutex::~ScopedMutex()
 {
    mMutex->Unlock();
+}
+
+ScopedTryMutex::ScopedTryMutex(NamedMutex* mutex, std::string locker)
+: mMutex(mutex)
+, mAcquired(mutex->TryLock(std::move(locker)))
+{
+}
+
+ScopedTryMutex::~ScopedTryMutex()
+{
+   if (mAcquired)
+      mMutex->Unlock();
 }
