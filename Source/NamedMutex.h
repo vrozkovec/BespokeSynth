@@ -31,12 +31,11 @@ class NamedMutex
 {
 public:
    void Lock(std::string locker);
+   bool TryLock(std::string locker);
    void Unlock();
 
 private:
-   ofMutex mMutex;
-   std::string mLocker{ "<none>" };
-   int mExtraLockCount{ 0 };
+   ofMutex mMutex; //recursive, so relocking from the same thread is safe
 };
 
 class ScopedMutex
@@ -47,4 +46,18 @@ public:
 
 private:
    NamedMutex* mMutex;
+};
+
+//acquires only if the mutex is free (or already held by this thread), so the realtime audio
+//thread can skip processing instead of blocking while another thread holds the mutex
+class ScopedTryMutex
+{
+public:
+   ScopedTryMutex(NamedMutex* mutex, std::string locker);
+   ~ScopedTryMutex();
+   bool WasAcquired() const { return mAcquired; }
+
+private:
+   NamedMutex* mMutex;
+   bool mAcquired;
 };

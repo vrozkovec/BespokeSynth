@@ -32,7 +32,6 @@
 #include "RollingBuffer.h"
 #include "Ramp.h"
 #include "Checkbox.h"
-#include "NamedMutex.h"
 #include "Sample.h"
 
 class ClipArranger : public IDrawableModule, public IFloatSliderListener, public IButtonListener
@@ -103,5 +102,4 @@ private:
    bool mMouseDown{ false };
    int mLastMouseX{ -1 };
    int mLastMouseY{ -1 };
-   NamedMutex mMutex;
 };
