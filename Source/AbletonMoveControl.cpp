@@ -1126,6 +1126,43 @@ void AbletonMoveControl::UpdateLeds()
       }
    }
 
+   SetLed(kBackButton, 127, mSelectedTrackRow == kTrackRowGlobal ? 20 : -1);
+   SetLed(kHamburgerButton, 127, mSelectedTrackRow == kTrackRowMixer ? 20 : -1);
+   SetLed(kPlayButton, TheSynth->IsAudioPaused() ? kColorRed : kColorGreen, mSelectedTrackRow == kTrackRowTransport ? kColorBrightBlue : -1);
+
+   int recordColor1 = kColorOff;
+   int recordColor2 = -1;
+   if (activeTrackRow)
+   {
+      auto* recorder = activeTrackRow->GetRecorder();
+      if (recorder != nullptr)
+      {
+         if (GetButtonState(kMoveDeleteButton))
+         {
+            recordColor1 = kColorBlue;
+            recordColor2 = kColorWhite;
+         }
+         else if (recorder->IsRecording())
+         {
+            if (GetButtonState(kShiftButton))
+            {
+               recordColor1 = kColorMustard;
+               recordColor2 = kColorDarkGrey;
+            }
+            else
+            {
+               recordColor1 = kColorRed;
+               recordColor2 = kColorDeepRed;
+            }
+         }
+         else
+         {
+            recordColor1 = kColorDarkGrey;
+         }
+      }
+   }
+   SetLed(kCircleButton, recordColor1, recordColor2);
+
    if (ShouldDisplaySnapshotView() && mSessionOrganizer != nullptr)
    {
       for (int i = 0; i < kNumTrackButtons; ++i)
@@ -1264,43 +1301,6 @@ void AbletonMoveControl::UpdateLeds()
          SetLed(buttonNumber, 0);
       }
    }
-
-   SetLed(kBackButton, 127, mSelectedTrackRow == kTrackRowGlobal ? 20 : -1);
-   SetLed(kHamburgerButton, 127, mSelectedTrackRow == kTrackRowMixer ? 20 : -1);
-   SetLed(kPlayButton, TheSynth->IsAudioPaused() ? kColorRed : kColorGreen, mSelectedTrackRow == kTrackRowTransport ? kColorBrightBlue : -1);
-
-   int recordColor1 = kColorOff;
-   int recordColor2 = -1;
-   if (activeTrackRow)
-   {
-      auto* recorder = activeTrackRow->GetRecorder();
-      if (recorder != nullptr)
-      {
-         if (GetButtonState(kMoveDeleteButton))
-         {
-            recordColor1 = kColorBlue;
-            recordColor2 = kColorWhite;
-         }
-         else if (recorder->IsRecording())
-         {
-            if (GetButtonState(kShiftButton))
-            {
-               recordColor1 = kColorMustard;
-               recordColor2 = kColorDarkGrey;
-            }
-            else
-            {
-               recordColor1 = kColorRed;
-               recordColor2 = kColorDeepRed;
-            }
-         }
-         else
-         {
-            recordColor1 = kColorDarkGrey;
-         }
-      }
-   }
-   SetLed(kCircleButton, recordColor1, recordColor2);
 
    if (mSelectedTrackRow == kTrackRowMixer)
    {
@@ -2022,7 +2022,7 @@ void AbletonMoveControl::OnMidiControl_Consume(MidiControl& control)
             {
                mSoundSelectorIndex = gRandom() % soundSelector->GetNumValues();
                int numValues = soundSelector->GetNumValues();
-               soundSelector->SetFromMidiCC(float(mSoundSelectorIndex) / (numValues - 1), NextBufferTime(true), false);
+               soundSelector->SetFromMidiCC(float(mSoundSelectorIndex) / (numValues - 1), NextBufferTime(true), SetValueMethod::Direct);
             }
          }
       }
@@ -2326,7 +2326,7 @@ void AbletonMoveControl::OnMidiControl_Consume(MidiControl& control)
             if (soundSelector != nullptr)
             {
                int numValues = soundSelector->GetNumValues();
-               soundSelector->SetFromMidiCC(float(mSoundSelectorIndex) / (numValues - 1), NextBufferTime(true), false);
+               soundSelector->SetFromMidiCC(float(mSoundSelectorIndex) / (numValues - 1), NextBufferTime(true), SetValueMethod::Direct);
             }
          }
       }
@@ -2889,13 +2889,13 @@ void AbletonMoveControl::AdjustControlWithEncoder(IUIControl* control, float mid
       if (increment > 0 && gTime - sLastButtonClickTime > 400)
       {
          sLastButtonClickTime = gTime;
-         button->SetFromMidiCC(1.0f, NextBufferTime(false), false);
+         button->SetFromMidiCC(1.0f, NextBufferTime(false), SetValueMethod::Direct);
       }
    }
    else
    {
       float newValue = std::clamp(currentNormalized + increment, 0.0f, 1.0f);
-      control->SetFromMidiCC(newValue, NextBufferTime(false), false);
+      control->SetFromMidiCC(newValue, NextBufferTime(false), SetValueMethod::Increment);
    }
 
    MidiController::sLastActivityUIControl = control;
@@ -2960,7 +2960,7 @@ void AbletonMoveControl::SetActiveTrackRow(int row, bool resetModuleIndex)
    else if (row == kTrackRowScale)
    {
       SetDisplayModule(TheScale);
-      SetGridControlInterface(nullptr);
+      SetGridControlInterface(TheScale);
    }
    else if (mSessionOrganizer != nullptr && row >= 0 && row < mSessionOrganizer->GetNumTracks())
    {
