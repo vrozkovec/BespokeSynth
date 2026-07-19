@@ -2375,20 +2375,7 @@ void ModularSynth::AudioOut(float* const* output, int bufferSize, int nChannels)
       return;
    }
 
-   //if another thread is holding the mutex (saving state, loading a layout, deleting modules...),
-   //output silence for this buffer rather than blocking: blocking inside the device callback
-   //starves the audio backend, which can leave it limping long after the mutex is released
-   //(seen with pipewire's ALSA emulation), making musical time advance far slower than realtime
-   ScopedTryMutex mutex(&mAudioThreadMutex, "audioOut()");
-   if (!mutex.WasAcquired())
-   {
-      for (int ch = 0; ch < nChannels; ++ch)
-      {
-         for (int i = 0; i < bufferSize; ++i)
-            output[ch][i] = 0;
-      }
-      return;
-   }
+   ScopedMutex mutex(&mAudioThreadMutex, "audioOut()");
 
    /////////// AUDIO PROCESSING STARTS HERE /////////////
    mNoteOutputQueue->Process();
@@ -2463,9 +2450,7 @@ void ModularSynth::AudioIn(const float* const* input, int bufferSize, int nChann
    if (mAudioPaused)
       return;
 
-   ScopedTryMutex mutex(&mAudioThreadMutex, "audioIn()");
-   if (!mutex.WasAcquired())
-      return; //a long-running main thread operation is in progress; skip this buffer (see AudioOut())
+   ScopedMutex mutex(&mAudioThreadMutex, "audioIn()");
 
    int oversampling = UserPrefs.oversampling.Get();
 
@@ -2801,11 +2786,9 @@ void ModularSynth::ResetLayout()
       mWelcomeScreen->SetName("welcome");
       mWelcomeScreen->CreateUIControls();
       mWelcomeScreen->Init();
+      mWelcomeScreen->SetOwningContainer(GetUIContainer());
       if (!mIsLoadingState && sFrameCount < 10 && UserPrefs.show_welcome_screen.Get())
          mWelcomeScreen->Show();
-      else
-         mWelcomeScreen->SetShowing(false);
-      mModuleContainer.AddModule(mWelcomeScreen);
    }
 
    GetDrawOffset().set(0, 0);
@@ -3276,56 +3259,55 @@ void ModularSynth::CompleteQueuedSaveState()
       TheTitleBar->DisplayTemporaryMessage("saved " + filename);
    }
 
-   //encode the screenshot before taking the audio mutex: while the mutex is held, the audio
-   //thread skips processing and outputs silence, so the locked window must stay short
-   juce::MemoryOutputStream screenshotStream;
-   if (mScreenshotPixels != nullptr)
-   {
-      juce::Image image(juce::Image::RGB, WelcomeScreen::kScreenshotWidth, WelcomeScreen::kScreenshotHeight, true);
-      for (int ix = 0; ix < WelcomeScreen::kScreenshotWidth; ++ix)
-      {
-         for (int iy = 0; iy < WelcomeScreen::kScreenshotHeight; ++iy)
-         {
-            int pos = (ix + (WelcomeScreen::kScreenshotHeight - 1 - iy) * WelcomeScreen::kScreenshotWidth) * 3;
-            image.setPixelAt(ix, iy, juce::Colour(mScreenshotPixels[pos], mScreenshotPixels[pos + 1], mScreenshotPixels[pos + 2]));
-         }
-      }
-      juce::PNGImageFormat pngWriter;
-      pngWriter.writeImageToStream(image, screenshotStream);
-   }
-
-   //serialize the whole state into memory while the mutex guarantees a stable module graph
-   juce::MemoryBlock saveData;
-
    mAudioThreadMutex.Lock("SaveState()");
 
    mZoomer.WriteCurrentLocation(-1);
 
+   //write to a temp file first, so we don't corrupt data if we crash mid-save
+   std::string tmpFilePath = ofToDataPath("tmp");
+
    {
-      FileStreamOut out(saveData);
+      FileStreamOut out(tmpFilePath);
 
       out << std::string("bskfile");
       out << kSaveStateRev;
 
-      int screenshotSize = (int)screenshotStream.getDataSize();
-      out << screenshotSize;
-      if (screenshotSize > 0)
-         out.WriteGeneric(screenshotStream.getData(), screenshotSize);
+      if (mScreenshotPixels != nullptr)
+      {
+         juce::Image image(juce::Image::RGB, WelcomeScreen::kScreenshotWidth, WelcomeScreen::kScreenshotHeight, true);
+         for (int ix = 0; ix < WelcomeScreen::kScreenshotWidth; ++ix)
+         {
+            for (int iy = 0; iy < WelcomeScreen::kScreenshotHeight; ++iy)
+            {
+               int pos = (ix + (WelcomeScreen::kScreenshotHeight - 1 - iy) * WelcomeScreen::kScreenshotWidth) * 3;
+               image.setPixelAt(ix, iy, juce::Colour(mScreenshotPixels[pos], mScreenshotPixels[pos + 1], mScreenshotPixels[pos + 2]));
+            }
+         }
+         juce::MemoryOutputStream stream;
+         juce::PNGImageFormat pngWriter;
+         pngWriter.writeImageToStream(image, stream);
+
+         int screenshotSize = (int)stream.getDataSize();
+         out << screenshotSize;
+         out.WriteGeneric(stream.getData(), screenshotSize);
+      }
+      else
+      {
+         int screenshotSize = 0;
+         out << screenshotSize;
+      }
 
       out << GetLayout().getRawString(true);
 
       mModuleContainer.SaveState(out);
       mUILayerModuleContainer.SaveState(out);
-   } //FileStreamOut's destructor flushes, finalizing saveData's size
+   }
 
-   mAudioThreadMutex.Unlock();
-
-   //disk I/O happens outside the lock. write to a temp file first, so we don't corrupt data if we crash mid-save
-   std::string tmpFilePath = ofToDataPath("tmp");
    juce::File writtenFile(tmpFilePath);
-   writtenFile.replaceWithData(saveData.getData(), saveData.getSize());
    juce::File targetFile(file);
    writtenFile.copyFileTo(targetFile);
+
+   mAudioThreadMutex.Unlock();
 }
 
 void ModularSynth::SetStartupSaveStateFile(std::string bskPath)
@@ -3654,7 +3636,7 @@ void ModularSynth::OnConsoleInput(std::string command /* = "" */)
       }
       else if (tokens[0] == "welcomescreen")
       {
-         mWelcomeScreen->Show();
+         PushModalFocusItem(mWelcomeScreen);
       }
       else if (tokens[0] == "dump" && tokens.size() >= 2)
       {
@@ -3709,14 +3691,6 @@ namespace
 void ModularSynth::DoAutosave()
 {
    const int kMaxAutosaveSlots = 10;
-   const double kMinAutosaveIntervalMs = 30000;
-
-   //autosave is triggered per module spawn, which can come in rapid bursts while patching;
-   //rate-limit it so each burst doesn't repeatedly silence audio and churn the autosave slots
-   const double now = juce::Time::getMillisecondCounterHiRes();
-   if (mLastAutosaveTime >= 0 && now - mLastAutosaveTime < kMinAutosaveIntervalMs)
-      return;
-   mLastAutosaveTime = now;
 
    juce::File parentDirectory(ofToDataPath("savestate/autosave"));
    Array<juce::File> autosaveFiles;
@@ -3961,8 +3935,6 @@ void ModularSynth::SetFatalError(std::string error)
          mUserPrefsEditor->Show();
       if (TheTitleBar != nullptr)
          TheTitleBar->SetShowing(false);
-      if (mWelcomeScreen != nullptr)
-         mWelcomeScreen->SetShowing(false);
    }
 }
 

@@ -341,7 +341,6 @@ private:
       bool mWaitingForScreenshot{ true };
    };
    QueuedSaveStateInfo mQueuedSaveStateInfo{};
-   double mLastAutosaveTime{ -1 }; //milliseconds, from juce::Time::getMillisecondCounterHiRes(); -1 means no autosave yet this session
 
    int mIOBufferSize{ 0 };
 

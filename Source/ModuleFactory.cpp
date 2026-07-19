@@ -206,7 +206,6 @@
 #include "NotePanRandom.h"
 #include "PulseGate.h"
 #include "PulseHocket.h"
-#include "PulseQuantize.h"
 #include "Push2Control.h"
 #include "PulseTrain.h"
 #include "NoteLatch.h"
@@ -285,7 +284,6 @@
 #include "AudioSyncer.h"
 #include "ChordKeyboard.h"
 #include "TapeLooper.h"
-#include "LocationRecaller.h"
 
 #include <juce_core/juce_core.h>
 
@@ -442,7 +440,6 @@ ModuleFactory::ModuleFactory()
    REGISTER(NotePanRandom, notepanrandom, kModuleCategory_Note);
    REGISTER(PulseGate, pulsegate, kModuleCategory_Pulse);
    REGISTER(PulseHocket, pulsehocket, kModuleCategory_Pulse);
-   REGISTER(PulseQuantize, pulsequantize, kModuleCategory_Pulse);
    REGISTER(Push2Control, push2control, kModuleCategory_Other);
    REGISTER(PulseTrain, pulsetrain, kModuleCategory_Pulse);
    REGISTER(NoteLatch, notelatch, kModuleCategory_Note);
@@ -526,7 +523,7 @@ ModuleFactory::ModuleFactory()
    REGISTER(AudioSyncer, audiosyncer, kModuleCategory_Audio);
    REGISTER(ChordKeyboard, chordkeyboard, kModuleCategory_Note);
    REGISTER(TapeLooper, tapelooper, kModuleCategory_Audio);
-   REGISTER(LocationRecaller, locationrecaller, kModuleCategory_Other);
+
    //REGISTER_EXPERIMENTAL(MidiPlayer, midiplayer, kModuleCategory_Instrument);
    REGISTER_HIDDEN(Autotalent, autotalent, kModuleCategory_Audio);
    REGISTER_HIDDEN(TakeRecorder, takerecorder, kModuleCategory_Audio);
