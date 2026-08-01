@@ -43,6 +43,19 @@
 #include "juce_audio_formats/juce_audio_formats.h"
 #include "juce_gui_basics/juce_gui_basics.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
+#if BESPOKE_LINUX || BESPOKE_MAC
+#include <csignal>
+#include <execinfo.h>
+#include <pthread.h>
+#include <unistd.h>
+#endif
+
 #ifdef JUCE_MAC
 #import <execinfo.h>
 #endif
@@ -837,6 +850,169 @@ bool IsAudioThread()
 bool IsRenderThread()
 {
    return std::this_thread::get_id() == ModularSynth::GetRenderThreadID();
+}
+
+namespace
+{
+   //shutdown diagnostics state. the flags are leaked heap atomics so the detached watchdog
+   //thread can never touch a destroyed static if it outlives main()
+   std::atomic<bool>& ShutdownInProgressFlag()
+   {
+      static auto* sFlag = new std::atomic<bool>(false);
+      return *sFlag;
+   }
+
+   std::atomic<bool>& ShutdownCompleteFlag()
+   {
+      static auto* sFlag = new std::atomic<bool>(false);
+      return *sFlag;
+   }
+
+   bool sShutdownDiagnosticsInitialized = false;
+   std::mutex sShutdownLogMutex;
+   FILE* sShutdownLogFile = nullptr;
+   std::chrono::steady_clock::time_point sShutdownStartTime;
+#if BESPOKE_LINUX || BESPOKE_MAC
+   pthread_t sMessageThreadHandle;
+   bool sHaveMessageThreadHandle = false;
+#endif
+
+   double SecondsSinceShutdownStart()
+   {
+      return std::chrono::duration<double>(std::chrono::steady_clock::now() - sShutdownStartTime).count();
+   }
+
+   //requires sShutdownLogMutex to be held
+   void WriteShutdownLineLocked(const std::string& message)
+   {
+      double elapsed = SecondsSinceShutdownStart();
+      fprintf(stderr, "[bespoke shutdown +%8.3fs] %s\n", elapsed, message.c_str());
+      if (sShutdownLogFile != nullptr)
+      {
+         fprintf(sShutdownLogFile, "[+%8.3fs] %s\n", elapsed, message.c_str());
+         fflush(sShutdownLogFile); //flush per line: the log must survive the process being killed
+      }
+   }
+
+   //for the watchdog thread: never block on the log mutex (the stuck thread could be holding it)
+   void WriteShutdownLineNonBlocking(const std::string& message)
+   {
+      if (sShutdownLogMutex.try_lock())
+      {
+         WriteShutdownLineLocked(message);
+         sShutdownLogMutex.unlock();
+      }
+      else
+      {
+         fprintf(stderr, "[bespoke shutdown +%8.3fs] %s\n", SecondsSinceShutdownStart(), message.c_str());
+      }
+   }
+
+   void StartShutdownWatchdog()
+   {
+      int timeoutSeconds = 30;
+      if (const char* env = getenv("BESPOKE_QUIT_WATCHDOG_SECS"))
+         timeoutSeconds = atoi(env); //<= 0 disables the kill stage (breadcrumbs unaffected)
+
+      std::thread([timeoutSeconds]
+                  {
+                     bool warned = false;
+                     for (;;)
+                     {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                        if (ShutdownCompleteFlag().load())
+                           return;
+                        double elapsed = SecondsSinceShutdownStart();
+                        if (!warned && elapsed >= 10)
+                        {
+                           warned = true;
+                           WriteShutdownLineNonBlocking("watchdog: still shutting down after 10s (OSC/MIDI teardown can legitimately take 10-15s)");
+                        }
+                        if (timeoutSeconds > 0 && elapsed >= timeoutSeconds)
+                           break;
+                     }
+
+                     WriteShutdownLineNonBlocking("WATCHDOG: shutdown exceeded " + ofToString(timeoutSeconds) + "s -- capturing the stuck thread's stack (crash_*.txt in the data directory), then killing the process");
+                     fflush(nullptr);
+
+#if BESPOKE_LINUX || BESPOKE_MAC
+                     if (sHaveMessageThreadHandle)
+                     {
+                        //thread-directed SIGABRT: juce's signal handler runs ModularSynth::CrashHandler
+                        //on the stuck message thread, so the crash file records that thread's backtrace,
+                        //then juce SIGKILLs the process
+                        pthread_kill(sMessageThreadHandle, SIGABRT);
+                     }
+#endif
+
+                     //backstop in case the crash handler itself deadlocks (it is not async-signal-safe)
+                     std::this_thread::sleep_for(std::chrono::seconds(10));
+                     fprintf(stderr, "[bespoke shutdown] WATCHDOG: crash handler did not terminate the process, forcing exit\n");
+#if BESPOKE_LINUX || BESPOKE_MAC
+                     kill(getpid(), SIGKILL); //kernel-level kill of every thread; nothing in userspace can block it
+#endif
+                     _exit(1);
+                  })
+      .detach();
+   }
+}
+
+void InitShutdownDiagnostics()
+{
+   sShutdownDiagnosticsInitialized = true;
+#if BESPOKE_LINUX || BESPOKE_MAC
+   sMessageThreadHandle = pthread_self();
+   sHaveMessageThreadHandle = true;
+   //pre-warm backtrace() so its lazy libgcc initialization (which allocates) happens now,
+   //not inside a crash handler running on a possibly-corrupted heap
+   void* frame;
+   backtrace(&frame, 1);
+#endif
+}
+
+void BeginShutdownDiagnostics()
+{
+   if (!sShutdownDiagnosticsInitialized)
+      return; //not a full app run (CLI early-exit or plugin-scanner subprocess)
+
+   if (ShutdownInProgressFlag().exchange(true))
+      return; //already begun
+
+   sShutdownStartTime = std::chrono::steady_clock::now();
+
+   {
+      std::lock_guard<std::mutex> lock(sShutdownLogMutex);
+      sShutdownLogFile = fopen(ofToDataPath("shutdown_log.txt").c_str(), "w");
+   }
+   ShutdownBreadcrumb("=== bespoke shutdown log, build " + GetBuildInfoString() + " ===");
+
+   StartShutdownWatchdog();
+}
+
+void ShutdownBreadcrumb(const std::string& message)
+{
+   if (!ShutdownInProgressFlag().load())
+      return; //stay silent during normal operation (module deletion etc. shares these code paths)
+
+   std::lock_guard<std::mutex> lock(sShutdownLogMutex);
+   WriteShutdownLineLocked(message);
+}
+
+void EndShutdownDiagnostics()
+{
+   ShutdownBreadcrumb("shutdown complete");
+   ShutdownCompleteFlag().store(true);
+   std::lock_guard<std::mutex> lock(sShutdownLogMutex);
+   if (sShutdownLogFile != nullptr)
+   {
+      fclose(sShutdownLogFile);
+      sShutdownLogFile = nullptr;
+   }
+}
+
+bool IsShutdownInProgress()
+{
+   return ShutdownInProgressFlag().load();
 }
 
 float GetLeftPanGain(float pan)

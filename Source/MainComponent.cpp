@@ -105,8 +105,12 @@ public:
 
    ~MainContentComponent()
    {
+      ShutdownBreadcrumb("~MainContentComponent begin");
+      ShutdownBreadcrumb("shutdownOpenGL begin (stopping GL render thread)");
       shutdownOpenGL();
+      ShutdownBreadcrumb("shutdownOpenGL done");
       shutdownAudio();
+      ShutdownBreadcrumb("MainContentComponent members destructing (~ModularSynth next)");
    }
 
    void timerCallback() override
@@ -196,8 +200,11 @@ public:
 
    void shutdownAudio()
    {
+      ShutdownBreadcrumb("shutdownAudio: removeAudioCallback (waits for in-flight audio callback)");
       mGlobalManagers.mDeviceManager.removeAudioCallback(this);
+      ShutdownBreadcrumb("shutdownAudio: closeAudioDevice");
       mGlobalManagers.mDeviceManager.closeAudioDevice();
+      ShutdownBreadcrumb("shutdownAudio done");
    }
 
    void initialise() override

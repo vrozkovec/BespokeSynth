@@ -375,12 +375,14 @@ void ModuleContainer::DeleteModule(IDrawableModule* module, bool fail /*= true*/
    {
       child->MarkAsDeleted();
       child->SetEnabled(false);
+      ShutdownBreadcrumb("exiting module: " + child->Path() + " (" + child->GetTypeName() + ")");
       child->Exit();
       TheSynth->OnModuleDeleted(child);
    }
 
    module->MarkAsDeleted();
    module->SetEnabled(false);
+   ShutdownBreadcrumb("exiting module: " + module->Path() + " (" + module->GetTypeName() + ")");
    module->Exit();
    TheSynth->OnModuleDeleted(module);
 }
