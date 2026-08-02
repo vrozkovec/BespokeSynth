@@ -143,6 +143,7 @@ public:
    void MoveToFront(IDrawableModule* module);
    bool InMidiMapMode();
    void GetAllModules(std::vector<IDrawableModule*>& out) { mModuleContainer.GetAllModules(out); }
+   void CloseAllPluginWindows(); //destroy open plugin editor windows while the message loop can still service them
 
    void PushModalFocusItem(IDrawableModule* item);
    void PopModalFocusItem();

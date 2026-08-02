@@ -12,6 +12,7 @@
 #include <memory>
 #include "VSTScanner.h"
 #include "SynthGlobals.h"
+#include "ModularSynth.h"
 
 #include "VersionInfo.h"
 
@@ -97,6 +98,8 @@ public:
          return;
       }
 
+      InitShutdownDiagnostics();
+
       mainWindow = std::make_unique<MainWindow>("bespoke synth");
 
       juce::PropertiesFile::Options options;
@@ -127,8 +130,14 @@ public:
    void shutdown() override
    {
       // Add your application's shutdown code here..
+      BeginShutdownDiagnostics(); //idempotent; covers direct quit() paths that skip systemRequestedQuit()
+      ShutdownBreadcrumb("BespokeApplication::shutdown() begin");
+      ShutdownBreadcrumb("destroying main window (GL, audio, modules)");
       mainWindow.reset();
+      ShutdownBreadcrumb("main window destroyed");
+      ShutdownBreadcrumb("saving/destroying app properties");
       appProperties.reset();
+      EndShutdownDiagnostics();
    }
 
    //==============================================================================
@@ -136,6 +145,11 @@ public:
    {
       // This is called when the app is being asked to quit: you can ignore this
       // request and let the app carry on running, or call quit() to allow the app to close.
+      BeginShutdownDiagnostics();
+      ShutdownBreadcrumb("quit requested");
+      if (TheSynth != nullptr)
+         TheSynth->CloseAllPluginWindows(); //destroy native plugin editor windows while the message loop can still service them
+      ShutdownBreadcrumb("stopping message dispatch loop");
       quit();
    }
 

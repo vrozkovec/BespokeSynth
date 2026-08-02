@@ -56,6 +56,11 @@ using namespace juce::gl;
 #include <winbase.h>
 #endif
 
+#if BESPOKE_LINUX || BESPOKE_MAC
+#include <execinfo.h>
+#include <unistd.h>
+#endif
+
 ModularSynth* TheSynth = nullptr;
 namespace
 {
@@ -109,22 +114,39 @@ ModularSynth::ModularSynth()
 
 ModularSynth::~ModularSynth()
 {
+   ShutdownBreadcrumb("~ModularSynth begin");
    DeleteAllModules();
 
    delete mGlobalRecordBuffer;
+   ShutdownBreadcrumb("resetting AudioPluginFormatManager and KnownPluginList");
    mAudioPluginFormatManager.reset();
    mKnownPluginList.reset();
 
    SetMemoryTrackingEnabled(false); //avoid crashes when the tracking lists themselves are deleted
 
    assert(TheSynth == this);
+   ShutdownBreadcrumb("clearing TheSynth global");
    TheSynth = nullptr;
 
+   ShutdownBreadcrumb("UninitializePython begin (py::finalize_interpreter)");
    ScriptModule::UninitializePython();
+   ShutdownBreadcrumb("UninitializePython done");
 }
 
 void ModularSynth::CrashHandler(void*)
 {
+#if BESPOKE_LINUX || BESPOKE_MAC
+   //this can run on a corrupted heap (e.g. glibc abort from a plugin double-free), where any
+   //allocation may deadlock. write() a marker and a raw stack dump to stderr first -- neither
+   //allocates -- so the hang site is captured even if DumpStats() below never completes.
+   static const char sMarker[] = "\n[bespoke] crash handler entered, raw backtrace of this thread:\n";
+   ssize_t bytesWritten = write(STDERR_FILENO, sMarker, sizeof(sMarker) - 1);
+   (void)bytesWritten;
+   void* frames[64];
+   int numFrames = backtrace(frames, 64);
+   backtrace_symbols_fd(frames, numFrames, STDERR_FILENO);
+#endif
+
    DumpStats(true, nullptr);
 }
 
@@ -472,18 +494,32 @@ void ModularSynth::Poll()
 
 void ModularSynth::DeleteAllModules()
 {
+   ShutdownBreadcrumb("DeleteAllModules: clearing module container");
    mModuleContainer.Clear();
 
+   ShutdownBreadcrumb("DeleteAllModules: deleting " + ofToString((int)mDeletedModules.size()) + " deferred modules");
    for (int i = 0; i < mDeletedModules.size(); ++i)
       delete mDeletedModules[i];
    mDeletedModules.clear();
 
+   ShutdownBreadcrumb("DeleteAllModules: deleting scale/transport/console singletons");
    delete TheScale;
    TheScale = nullptr;
    delete TheTransport;
    TheTransport = nullptr;
    delete mConsoleListener;
    mConsoleListener = nullptr;
+}
+
+void ModularSynth::CloseAllPluginWindows()
+{
+   std::vector<IDrawableModule*> modules;
+   mModuleContainer.GetAllModules(modules); //recurses into prefabs and other containers
+   for (auto* module : modules)
+   {
+      if (auto* vst = dynamic_cast<VSTPlugin*>(module))
+         vst->ClosePluginWindow();
+   }
 }
 
 bool SortPointsByY(ofVec2f a, ofVec2f b)

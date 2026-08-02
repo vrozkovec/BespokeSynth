@@ -248,6 +248,13 @@ double NextBufferTime(bool includeLookahead);
 bool IsMainThread();
 bool IsAudioThread();
 bool IsRenderThread();
+//shutdown diagnostics: breadcrumbs to stderr + <datadir>/shutdown_log.txt, plus a watchdog
+//that captures the hung thread's stack if quitting takes too long
+void InitShutdownDiagnostics(); //call once at startup, on the message thread
+void BeginShutdownDiagnostics(); //idempotent: marks quit-in-progress, opens the log, arms the watchdog
+void ShutdownBreadcrumb(const std::string& message); //no-op until BeginShutdownDiagnostics() has run
+void EndShutdownDiagnostics(); //logs completion and disarms the watchdog
+bool IsShutdownInProgress();
 
 inline static float RandomSample()
 {
