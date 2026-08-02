@@ -12,6 +12,7 @@
 #include <memory>
 #include "VSTScanner.h"
 #include "SynthGlobals.h"
+#include "ModularSynth.h"
 
 #include "VersionInfo.h"
 
@@ -146,6 +147,8 @@ public:
       // request and let the app carry on running, or call quit() to allow the app to close.
       BeginShutdownDiagnostics();
       ShutdownBreadcrumb("quit requested");
+      if (TheSynth != nullptr)
+         TheSynth->CloseAllPluginWindows(); //destroy native plugin editor windows while the message loop can still service them
       ShutdownBreadcrumb("stopping message dispatch loop");
       quit();
    }

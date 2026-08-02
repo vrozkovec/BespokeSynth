@@ -80,6 +80,7 @@ public:
 
    void SetVST(juce::PluginDescription pluginDesc);
    void OnVSTWindowClosed();
+   void ClosePluginWindow();
 
    //IAudioSource
    void Process(double time) override;

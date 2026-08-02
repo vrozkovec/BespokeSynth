@@ -36,6 +36,8 @@
 #include "UserPrefs.h"
 //#include "NSWindowOverlay.h"
 
+#include <cstdlib>
+
 namespace
 {
    const int kGlobalModulationIdx = 16;
@@ -435,13 +437,39 @@ VSTPlugin::~VSTPlugin()
 void VSTPlugin::Exit()
 {
    IDrawableModule::Exit();
-   if (mWindow)
-   {
-      mWindow.reset();
-   }
+   ClosePluginWindow();
    if (mPlugin)
    {
+      //escape hatch for plugins that crash or corrupt the heap in their destructor: at quit the
+      //OS reclaims everything anyway, so intentionally leaking the instance is safe and lets the
+      //app exit cleanly. opt-in because well-behaved plugins deserve a proper teardown.
+      static const bool sLeakPluginsOnQuit = []()
+      {
+         const char* env = getenv("BESPOKE_LEAK_PLUGINS_ON_QUIT");
+         return env != nullptr && atoi(env) != 0;
+      }();
+      if (sLeakPluginsOnQuit && IsShutdownInProgress())
+      {
+         ShutdownBreadcrumb("VSTPlugin " + GetPluginName() + ": leaking plugin instance (BESPOKE_LEAK_PLUGINS_ON_QUIT is set)");
+         mPlugin.release();
+         return;
+      }
+
+      ShutdownBreadcrumb("VSTPlugin " + GetPluginName() + ": destroying plugin instance");
       mPlugin.reset();
+      ShutdownBreadcrumb("VSTPlugin " + GetPluginName() + ": plugin instance destroyed");
+   }
+}
+
+void VSTPlugin::ClosePluginWindow()
+{
+   if (mWindow)
+   {
+      ShutdownBreadcrumb("VSTPlugin " + GetPluginName() + ": destroying editor window");
+      //must be reset(), never release(): ~VSTWindow -> clearContentComponent() destroys the
+      //plugin editor; release() would leak both the window and the editor
+      mWindow.reset();
+      ShutdownBreadcrumb("VSTPlugin " + GetPluginName() + ": editor window destroyed");
    }
 }
 

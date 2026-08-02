@@ -511,6 +511,17 @@ void ModularSynth::DeleteAllModules()
    mConsoleListener = nullptr;
 }
 
+void ModularSynth::CloseAllPluginWindows()
+{
+   std::vector<IDrawableModule*> modules;
+   mModuleContainer.GetAllModules(modules); //recurses into prefabs and other containers
+   for (auto* module : modules)
+   {
+      if (auto* vst = dynamic_cast<VSTPlugin*>(module))
+         vst->ClosePluginWindow();
+   }
+}
+
 bool SortPointsByY(ofVec2f a, ofVec2f b)
 {
    return a.y < b.y;
