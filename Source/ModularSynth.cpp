@@ -273,6 +273,10 @@ void ModularSynth::Setup(juce::AudioDeviceManager* globalAudioDeviceManager, juc
 
    mGlobalRecordBuffer = new RollingBuffer(UserPrefs.record_buffer_length_minutes.Get() * 60 * gSampleRate);
    mGlobalRecordBuffer->SetNumChannels(2);
+   //channels are allocated (and zeroed) when they're first used, which would otherwise be in the first audio
+   //callback. at the default length that's hundreds of MB, so do it now, before the audio device starts
+   for (int ch = 0; ch < mGlobalRecordBuffer->GetRawBuffer()->NumActiveChannels(); ++ch)
+      mGlobalRecordBuffer->GetRawBuffer()->GetChannel(ch);
 
    juce::File(ofToDataPath("savestate")).createDirectory();
    juce::File(ofToDataPath("savestate/autosave")).createDirectory();
@@ -327,11 +331,13 @@ void ModularSynth::LoadResources()
       mFatalError = "couldn't load font from " + gFont.GetFontPath() + "\nmaybe bespoke can't find your resources directory?";
 }
 
+//adds buffers up to the given counts. this can be called again if the device opens more channels later (on android,
+//the input is opened once the user allows microphone access), but not while the audio callback is running
 void ModularSynth::InitIOBuffers(int inputChannelCount, int outputChannelCount)
 {
-   for (int i = 0; i < inputChannelCount; ++i)
+   while ((int)mInputBuffers.size() < inputChannelCount)
       mInputBuffers.push_back(new float[gBufferSize]);
-   for (int i = 0; i < outputChannelCount; ++i)
+   while ((int)mOutputBuffers.size() < outputChannelCount)
       mOutputBuffers.push_back(new float[gBufferSize]);
 }
 
@@ -376,7 +382,12 @@ void ModularSynth::Poll()
          mUserPrefsEditor->CreatePrefsFileIfNonexistent();
 
          if (!mStartupSaveStateFile.empty())
+         {
+            //allow paths relative to the data folder, since its absolute path isn't easily known on iOS
+            if (!juce::File::isAbsolutePath(mStartupSaveStateFile))
+               mStartupSaveStateFile = ofToDataPath(mStartupSaveStateFile);
             LoadState(mStartupSaveStateFile);
+         }
          else
             LoadLayoutFromFile(ofToDataPath(UserPrefs.layout.Get()));
          mInitialized = true;
@@ -403,6 +414,13 @@ void ModularSynth::Poll()
    {
       mShowLoadStatePopup = false;
       LoadStatePopupImp();
+   }
+
+   if (!mPendingSaveStateFile.empty())
+   {
+      std::string file = std::move(mPendingSaveStateFile);
+      mPendingSaveStateFile.clear();
+      LoadState(file);
    }
 
    if (mScheduledEnvelopeEditorSpawnDisplay != nullptr)
@@ -813,6 +831,9 @@ void ModularSynth::Draw()
       tooltipContainer = &mModuleContainer;
    }
    else if (HelpDisplay::sShowTooltips &&
+#if BESPOKE_MOBILE
+            mShowTouchTooltips &&
+#endif
             !mHideTooltipsUntilMouseMove &&
             !IUIControl::WasLastHoverSetManually() &&
             mGroupSelectContext == nullptr &&
@@ -1001,12 +1022,21 @@ void ModularSynth::PostRender()
 
    if (mQueuedSaveStateInfo.mQueued && mQueuedSaveStateInfo.mWaitingForScreenshot)
    {
+      if (mScreenshotFrameBuffer != nullptr && mScreenshotFrameBufferContextGeneration != gNanoVGContextGeneration)
+      {
+         //its GL objects went away with the old context, so just free the struct
+         free(mScreenshotFrameBuffer);
+         mScreenshotFrameBuffer = nullptr;
+      }
+
       if (mScreenshotFrameBuffer == nullptr)
       {
          mScreenshotFrameBuffer = nvgluCreateFramebuffer(gNanoVGRenderContexts[(int)NanoVGRenderContext::Screenshot], WelcomeScreen::kScreenshotWidth, WelcomeScreen::kScreenshotHeight, 0);
          assert(mScreenshotFrameBuffer);
+         mScreenshotFrameBufferContextGeneration = gNanoVGContextGeneration;
 
-         mScreenshotPixels = new unsigned char[WelcomeScreen::kScreenshotWidth * WelcomeScreen::kScreenshotHeight * 3];
+         if (mScreenshotPixels == nullptr)
+            mScreenshotPixels = new unsigned char[WelcomeScreen::kScreenshotWidth * WelcomeScreen::kScreenshotHeight * 3];
       }
 
       if (mScreenshotFrameBuffer != nullptr)
@@ -1177,7 +1207,9 @@ void ModularSynth::Exit()
 
 void ModularSynth::Focus()
 {
+#if !BESPOKE_MOBILE //iOS shows a permission prompt when an app reads the clipboard, so there it waits for an actual paste
    ReadClipboardTextFromSystem();
+#endif
 }
 
 IDrawableModule* ModularSynth::GetLastClickedModule() const
@@ -1227,7 +1259,7 @@ void ModularSynth::KeyPressed(int key, bool isRepeat)
       {
          gHoveredUIControl->ResetToDefault();
       }
-      else if ((toupper(key) == 'C' || toupper(key) == 'X') && GetKeyModifiers() == kModifier_Command)
+      else if ((KeyToUpper(key) == 'C' || KeyToUpper(key) == 'X') && GetKeyModifiers() == kModifier_Command)
       {
          TheSynth->CopyTextToClipboard(ofToString(gHoveredUIControl->GetValue()));
       }
@@ -1263,11 +1295,7 @@ void ModularSynth::KeyPressed(int key, bool isRepeat)
    key = KeyToLower(key); //now convert to lowercase because everything else just cares about keys as buttons (unmodified by shift)
 
    if ((key == juce::KeyPress::backspaceKey || key == juce::KeyPress::deleteKey) && !isRepeat)
-   {
-      for (auto module : mGroupSelectedModules)
-         module->GetOwningContainer()->DeleteModule(module);
-      mGroupSelectedModules.clear();
-   }
+      DeleteGroupSelectedModules();
 
    if (key == KeyPress::F2Key && !isRepeat)
    {
@@ -1952,8 +1980,19 @@ void ModularSynth::MousePressed(int intX, int intY, int button, const juce::Mous
    if (gHoveredUIControl != nullptr)
       hoveredUIControlModuleParent = gHoveredUIControl->GetModuleParent();
 
+   //in repatch mode, the enlarged cable sources overlap UI controls, and should take priority over them
+   bool hoveringRepatchCableSource = false;
+   if (IsRepatchMode() && hoveredUIControlModuleParent != nullptr)
+   {
+      for (auto* source : hoveredUIControlModuleParent->GetPatchCableSources())
+      {
+         if (source->IsHovered())
+            hoveringRepatchCableSource = true;
+      }
+   }
+
    if (hoveredUIControlModuleParent != nullptr && !hoveredUIControlModuleParent->IsDeleted() && !hoveredUIControlModuleParent->IsHoveringOverResizeHandle() &&
-       !IUIControl::WasLastHoverSetManually() &&
+       !IUIControl::WasLastHoverSetManually() && !hoveringRepatchCableSource &&
        mGroupSelectedModules.empty() &&
        mQuickSpawn->IsShowing() == false &&
        (GetTopModalFocusItem() == nullptr || hoveredUIControlModuleParent == GetTopModalFocusItem()))
@@ -2063,13 +2102,14 @@ void ModularSynth::MousePressed(int intX, int intY, int button, const juce::Mous
       }
       mHasDuplicatedDuringDrag = false;
 
-      if (mGroupSelectedModules.empty() == false)
+      if (mGroupSelectedModules.empty() == false && clickedModule != TheTitleBar) //let title bar clicks through, so the touch mode delete button can act on the selection
       {
          if (!VectorContains(clickedModule, mGroupSelectedModules))
             mGroupSelectedModules.clear();
          return;
       }
 
+      bool quickSpawnWasShowing = mQuickSpawn != nullptr && mQuickSpawn->IsShowing(); //so a click that opens it (e.g. the title bar's spawn button) doesn't immediately close it
       if (clickedModule)
       {
          x = GetMouseX(clickedModule->GetModuleParent()->GetOwningContainer());
@@ -2084,9 +2124,16 @@ void ModularSynth::MousePressed(int intX, int intY, int button, const juce::Mous
       if (clickedModule == nullptr)
          mLastClickWasEmptySpace = true;
 
-      if (mQuickSpawn != nullptr && mQuickSpawn->IsShowing() && clickedModule != mQuickSpawn)
+      if (quickSpawnWasShowing && mQuickSpawn->IsShowing() && clickedModule != mQuickSpawn)
          mQuickSpawn->Hide();
    }
+}
+
+void ModularSynth::DeleteGroupSelectedModules()
+{
+   for (auto module : mGroupSelectedModules)
+      module->GetOwningContainer()->DeleteModule(module);
+   mGroupSelectedModules.clear();
 }
 
 void ModularSynth::ToggleQuickSpawn()
@@ -2225,6 +2272,21 @@ void ModularSynth::MouseMagnify(int intX, int intY, float scaleFactor, const juc
    ZoomView(scaleFactor - 1, true);
 }
 
+//in touch navigation mode, touches on the canvas pan/zoom, but some places still need regular clicks
+bool ModularSynth::ShouldTouchAlwaysClick(int x, int y)
+{
+   if (!mModalFocusItemStack.empty()) //popup menus (e.g. the title bar's main menu) need to be tappable and dismissable
+      return true;
+
+   if (mMoveModule != nullptr) //a freshly spawned module stuck to the cursor gets placed with a tap
+      return true;
+
+   //the title bar and other UI-layer elements
+   float uiX = GetMouseX(&mUILayerModuleContainer, x);
+   float uiY = GetMouseY(&mUILayerModuleContainer, y);
+   return mUILayerModuleContainer.GetModuleAt(uiX, uiY) != nullptr;
+}
+
 bool ModularSynth::InMidiMapMode()
 {
    return IsKeyHeld('m', kModifier_Shift);
@@ -2317,7 +2379,9 @@ void ModularSynth::CheckClick(IDrawableModule* clickedModule, float x, float y, 
    float modulePosX = x - moduleRect.x;
    float modulePosY = y - moduleRect.y;
 
-   if (modulePosY < 0 && clickedModule != TheTitleBar && (!clickedModule->HasEnabledCheckbox() || modulePosX > 20) && modulePosX < moduleRect.width - 15)
+   if (modulePosY < 0 &&
+       clickedModule->GetOwningContainer() != &mUILayerModuleContainer && //UI layer modules (title bar, settings, etc) are fixed in place
+       (!clickedModule->HasEnabledCheckbox() || modulePosX > 20) && modulePosX < moduleRect.width - 15)
       SetMoveModule(clickedModule, moduleRect.x - x, moduleRect.y - y, false);
 
    float parentX = 0;
@@ -3243,10 +3307,17 @@ void ModularSynth::SaveLayout(std::string jsonFile, bool makeDefaultLayout /*= t
    if (jsonFile.empty())
       jsonFile = ofToDataPath(mLoadedLayoutPath);
 
-   ofxJSONElement root = GetLayout();
-   root.save(jsonFile, true);
+   SaveLayout(SaveTarget(jsonFile), makeDefaultLayout);
+}
 
-   mLoadedLayoutPath = String(jsonFile).replace(ofToDataPath("").c_str(), "").toStdString();
+void ModularSynth::SaveLayout(const SaveTarget& target, bool makeDefaultLayout /*= true*/)
+{
+   ofxJSONElement root = GetLayout();
+   root.save(target.GetWritePath(), true);
+   if (!target.Commit())
+      return;
+
+   mLoadedLayoutPath = String(target.GetPath()).replace(ofToDataPath("").c_str(), "").toStdString();
 
    TheTitleBar->ListLayouts();
    if (makeDefaultLayout)
@@ -3255,11 +3326,11 @@ void ModularSynth::SaveLayout(std::string jsonFile, bool makeDefaultLayout /*= t
 
 void ModularSynth::SaveLayoutAsPopup()
 {
-   bool isNativeFileChooser = !UserPrefs.force_juce_file_chooser.Get();
-
-   FileChooser chooser("Save current layout as...", File(ofToDataPath("layouts/newlayout.json")), "*.json", isNativeFileChooser, false, GetFileChooserParent());
-   if (chooser.browseForFileToSave(true))
-      SaveLayout(chooser.getResult().getFullPathName().toStdString());
+   auto onChosen = [this](const juce::FileChooser& chooser)
+   {
+      SaveLayout(SaveTarget(chooser));
+   };
+   BrowseForFileToSave("Save current layout as...", File(ofToDataPath("layouts/newlayout.json")), "*.json", onChosen);
 }
 
 void ModularSynth::SaveCurrentState()
@@ -3270,7 +3341,7 @@ void ModularSynth::SaveCurrentState()
       return;
    }
 
-   SaveState(mCurrentSaveStatePath, false);
+   SaveState(mCurrentSaveTarget.GetPath() == mCurrentSaveStatePath ? mCurrentSaveTarget : SaveTarget(mCurrentSaveStatePath), false);
 }
 
 juce::Component* ModularSynth::GetFileChooserParent() const
@@ -3301,11 +3372,11 @@ void ModularSynth::SaveStatePopup()
       ++counter;
    } while (targetFile.existsAsFile());
 
-   bool isNativeFileChooser = !UserPrefs.force_juce_file_chooser.Get();
-
-   FileChooser chooser("Save current state as...", targetFile, "*.bsk", isNativeFileChooser, false, GetFileChooserParent());
-   if (chooser.browseForFileToSave(true))
-      SaveState(chooser.getResult().getFullPathName().toStdString(), false);
+   auto onChosen = [this](const juce::FileChooser& chooser)
+   {
+      SaveState(SaveTarget(chooser), false);
+   };
+   BrowseForFileToSave("Save current state as...", targetFile, "*.bsk", onChosen);
 }
 
 void ModularSynth::LoadStatePopup()
@@ -3321,19 +3392,21 @@ void ModularSynth::LoadStatePopupImp()
    else
       defaultDirectoryOrFile = ofToDataPath("savestate/");
 
-   bool isNativeFileChooser = !UserPrefs.force_juce_file_chooser.Get();
-
-   FileChooser chooser("Load state", File(defaultDirectoryOrFile), "*.bsk;*.bskt", isNativeFileChooser, false, GetFileChooserParent());
-   if (chooser.browseForFileToOpen())
-      LoadState(chooser.getResult().getFullPathName().toStdString());
+   auto onChosen = [this](const juce::FileChooser& chooser)
+   {
+      LoadState(SaveTarget(chooser));
+   };
+   BrowseForFileToOpen("Load state", File(defaultDirectoryOrFile), "*.bsk;*.bskt", onChosen);
 }
 
 void ModularSynth::SaveState(std::string file, bool autosave)
 {
-   if (!autosave)
-      AddRecentFile(file, true);
+   SaveState(SaveTarget(file), autosave);
+}
 
-   mQueuedSaveStateInfo.mFile = file;
+void ModularSynth::SaveState(const SaveTarget& target, bool autosave)
+{
+   mQueuedSaveStateInfo.mTarget = target;
    mQueuedSaveStateInfo.mAutosave = autosave;
    mQueuedSaveStateInfo.mWaitingForScreenshot = true;
    mQueuedSaveStateInfo.mQueued = true;
@@ -3341,17 +3414,9 @@ void ModularSynth::SaveState(std::string file, bool autosave)
 
 void ModularSynth::CompleteQueuedSaveState()
 {
-   std::string file = mQueuedSaveStateInfo.mFile;
+   SaveTarget target = mQueuedSaveStateInfo.mTarget;
    bool autosave = mQueuedSaveStateInfo.mAutosave;
    mQueuedSaveStateInfo.mQueued = false;
-
-   if (!autosave)
-   {
-      mCurrentSaveStatePath = file;
-      std::string filename = File(mCurrentSaveStatePath).getFileName().toStdString();
-      mMainComponent->getTopLevelComponent()->setName("bespoke synth - " + filename);
-      TheTitleBar->DisplayTemporaryMessage("saved " + filename);
-   }
 
    mAudioThreadMutex.Lock("SaveState()");
 
@@ -3397,16 +3462,31 @@ void ModularSynth::CompleteQueuedSaveState()
       mUILayerModuleContainer.SaveState(out);
    }
 
-   juce::File writtenFile(tmpFilePath);
-   juce::File targetFile(file);
-   writtenFile.copyFileTo(targetFile);
-
    mAudioThreadMutex.Unlock();
+
+   //the temp file stays in place if this fails, so the data can still be recovered
+   if (target.CommitFrom(juce::File(tmpFilePath)) && !autosave)
+   {
+      mCurrentSaveStatePath = target.GetPath();
+      mCurrentSaveTarget = target;
+      std::string filename = File(mCurrentSaveStatePath).getFileName().toStdString();
+      mMainComponent->getTopLevelComponent()->setName("bespoke synth - " + filename);
+      TheTitleBar->DisplayTemporaryMessage("saved " + filename);
+      AddRecentFile(mCurrentSaveStatePath, true);
+   }
 }
 
 void ModularSynth::SetStartupSaveStateFile(std::string bskPath)
 {
    mStartupSaveStateFile = std::move(bskPath);
+}
+
+void ModularSynth::OpenSaveStateFile(std::string bskPath)
+{
+   if (mInitialized)
+      mPendingSaveStateFile = std::move(bskPath);
+   else
+      mStartupSaveStateFile = std::move(bskPath);
 }
 
 void ModularSynth::AddRecentFile(std::string file, bool saved)
@@ -3435,9 +3515,16 @@ void ModularSynth::AddRecentFile(std::string file, bool saved)
 
 void ModularSynth::LoadState(std::string file)
 {
+   LoadState(file == mCurrentSaveTarget.GetPath() ? mCurrentSaveTarget : SaveTarget(file));
+}
+
+void ModularSynth::LoadState(const SaveTarget& target)
+{
+   std::string file = target.GetPath();
    ofLog() << "LoadState() " << file;
 
-   if (!juce::File(file).existsAsFile())
+   auto stream = target.CreateInputStream();
+   if (stream == nullptr)
    {
       LogEvent("couldn't find file " + file, kLogEventType_Error);
       return;
@@ -3448,7 +3535,7 @@ void ModularSynth::LoadState(std::string file)
    if (mInitialized)
       TitleBar::sShowInitialHelpOverlay = false; //don't show initial help popup
 
-   FileStreamIn in(ofToDataPath(file));
+   FileStreamIn in(std::move(stream));
 
    if (in.Eof())
    {
@@ -3484,10 +3571,14 @@ void ModularSynth::LoadState(std::string file)
 
    FileStreamIn::s32BitMode = false;
 
-   mCurrentSaveStatePath = file;
-   File savePath(mCurrentSaveStatePath);
-   std::string filename = savePath.getFileName().toStdString();
-   mMainComponent->getTopLevelComponent()->setName("bespoke synth - " + filename);
+   if (layoutLoaded) //otherwise the previous patch is still here, and saving shouldn't write it over this file
+   {
+      mCurrentSaveStatePath = file;
+      mCurrentSaveTarget = target;
+      File savePath(mCurrentSaveStatePath);
+      std::string filename = savePath.getFileName().toStdString();
+      mMainComponent->getTopLevelComponent()->setName("bespoke synth - " + filename);
+   }
 
    mAudioThreadMutex.Lock("LoadState()");
    LockRender(true);
@@ -3501,10 +3592,9 @@ void ModularSynth::LoadState(std::string file)
 void ModularSynth::LoadStateHeader(FileStreamIn& in, unsigned char*& screenshotData, int& screenshotSize, std::string& jsonLayoutString)
 {
    // here's a little hack to allow older BSK files that were saved in 32-bit to load.
-   uint64_t firstLength[1];
+   uint64_t firstLength[1]{ 0 }; //stays 0 if the file is too short to read
    in.Peek(firstLength, sizeof(uint64_t));
-   if (firstLength[0] >= FileStreamIn::sMaxStringLength)
-      FileStreamIn::s32BitMode = true;
+   FileStreamIn::s32BitMode = firstLength[0] >= FileStreamIn::sMaxStringLength;
 
    std::string headerString;
    in >> headerString;
@@ -4004,8 +4094,11 @@ void ModularSynth::SaveOutput()
    TheTitleBar->DisplayTemporaryMessage("wrote " + filename);
 }
 
-const String& ModularSynth::GetTextFromClipboard() const
+const String& ModularSynth::GetTextFromClipboard()
 {
+#if BESPOKE_MOBILE
+   ReadClipboardTextFromSystem();
+#endif
    return TheClipboard;
 }
 

@@ -318,7 +318,7 @@ void IDrawableModule::DrawFrame(float w, float h, bool drawModule, float& titleB
          }
       }
 
-      if (IsSaveable() && !Minimized())
+      if (IsSaveable() && !Minimized() && ShouldShowTriangleMenu())
       {
          ofSetColor(color.r, color.g, color.b, gModuleDrawAlpha);
          if (TheSaveDataPanel->GetModule() == this)
@@ -439,31 +439,34 @@ void IDrawableModule::Render()
    if (Minimized() || IsVisible() == false)
       DrawBeacon(30, -titleBarHeight / 2);
 
-   ofPushStyle();
-   const float kPipWidth = 8;
-   const float kPipSpacing = 2;
-   float receiveIndicatorX = w - (kPipWidth + kPipSpacing);
-   ofFill();
+   if (ShouldShowReceiveIndicators())
+   {
+      ofPushStyle();
+      const float kPipWidth = 8;
+      const float kPipSpacing = 2;
+      float receiveIndicatorX = w - (kPipWidth + kPipSpacing);
+      ofFill();
 
-   if (CanReceiveAudio())
-   {
-      ofSetColor(GetColor(kModuleCategory_Audio));
-      ofRect(receiveIndicatorX, -titleBarHeight - 2, kPipWidth, 3, 1.0f);
-      receiveIndicatorX -= kPipWidth + kPipSpacing;
+      if (CanReceiveAudio())
+      {
+         ofSetColor(GetColor(kModuleCategory_Audio));
+         ofRect(receiveIndicatorX, -titleBarHeight - 2, kPipWidth, 3, 1.0f);
+         receiveIndicatorX -= kPipWidth + kPipSpacing;
+      }
+      if (CanReceiveNotes())
+      {
+         ofSetColor(GetColor(kModuleCategory_Note));
+         ofRect(receiveIndicatorX, -titleBarHeight - 2, kPipWidth, 3, 1.0f);
+         receiveIndicatorX -= kPipWidth + kPipSpacing;
+      }
+      if (CanReceivePulses())
+      {
+         ofSetColor(GetColor(kModuleCategory_Pulse));
+         ofRect(receiveIndicatorX, -titleBarHeight - 2, kPipWidth, 3, 1.0f);
+         receiveIndicatorX -= kPipWidth + kPipSpacing;
+      }
+      ofPopStyle();
    }
-   if (CanReceiveNotes())
-   {
-      ofSetColor(GetColor(kModuleCategory_Note));
-      ofRect(receiveIndicatorX, -titleBarHeight - 2, kPipWidth, 3, 1.0f);
-      receiveIndicatorX -= kPipWidth + kPipSpacing;
-   }
-   if (CanReceivePulses())
-   {
-      ofSetColor(GetColor(kModuleCategory_Pulse));
-      ofRect(receiveIndicatorX, -titleBarHeight - 2, kPipWidth, 3, 1.0f);
-      receiveIndicatorX -= kPipWidth + kPipSpacing;
-   }
-   ofPopStyle();
 
    if (IsResizable() && !Minimized())
    {
@@ -897,9 +900,13 @@ void IDrawableModule::GetDimensions(float& width, float& height)
       height = 1;
       return; //special case for repatch stub, let it be 1 pixel
    }
-   ofVec2f minimumDimensions = GetMinimumDimensions();
-   moduleWidth = MAX(moduleWidth, minimumDimensions.x);
-   moduleHeight = MAX(moduleHeight, minimumDimensions.y);
+
+   if (!ShouldForceExactDimensions())
+   {
+      ofVec2f minimumDimensions = GetMinimumDimensions();
+      moduleWidth = MAX(moduleWidth, minimumDimensions.x);
+      moduleHeight = MAX(moduleHeight, minimumDimensions.y);
+   }
 
    width = EaseIn(moduleWidth, minimizedWidth, mMinimizeAnimation);
    height = EaseOut(moduleHeight, minimizedHeight, mMinimizeAnimation);
@@ -1292,7 +1299,7 @@ void IDrawableModule::SaveState(FileStreamOut& out)
    out << mPinnedPosition.x;
    out << mPinnedPosition.y;
 
-   if (IsResizable())
+   if (ShouldSaveSize())
    {
       out << mWidth;
       out << mHeight;
@@ -1376,7 +1383,7 @@ void IDrawableModule::LoadState(FileStreamIn& in, int rev)
       in >> mPinnedPosition.y;
    }
 
-   if (baseRev >= 4 && IsResizable())
+   if (baseRev >= 4 && ShouldSaveSize())
    {
       float width, height;
       in >> width;
@@ -1410,6 +1417,12 @@ void IDrawableModule::LoadState(FileStreamIn& in, int rev)
          {
             //ofLog() << "loading control " << uicontrolname;
             auto* control = FindUIControl(uicontrolname.c_str(), false);
+
+            if (control == nullptr)
+            {
+               OnUIControlRequested(uicontrolname.c_str()); //some modules create controls on demand (e.g. plugin parameters)
+               control = FindUIControl(uicontrolname.c_str(), false);
+            }
 
             if (control == nullptr)
                throw UnknownUIControlException();

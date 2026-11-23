@@ -15,10 +15,13 @@
 #include "ModuleContainer.h"
 #include "Minimap.h"
 #include "LockFreeQueue.h"
+#include "SaveTarget.h"
 #include <thread>
 
 #ifdef BESPOKE_LINUX
 #include <climits>
+
+#include <atomic>
 #endif
 
 namespace juce
@@ -109,6 +112,14 @@ public:
    void MouseReleased(int x, int y, int button, const juce::MouseInputSource& source);
    void MouseScrolled(float xScroll, float yScroll, bool isSmoothScroll, bool isInvertedScroll, bool canZoomCanvas);
    void MouseMagnify(int x, int y, float scaleFactor, const juce::MouseInputSource& source);
+   bool IsTouchNavigationMode() const { return mTouchInteractionMode == TouchInteractionMode::PanZoom; }
+   bool IsRepatchMode() const { return mTouchInteractionMode == TouchInteractionMode::Repatch; }
+   void SetResamplingDeviceSampleRate(int rate) { mResamplingDeviceSampleRate = rate; } //0 when not resampling. may be called from the audio thread
+   int GetResamplingDeviceSampleRate() const { return mResamplingDeviceSampleRate; }
+   void SetTouchInteractionMode(TouchInteractionMode mode) { mTouchInteractionMode = mode; }
+   TouchInteractionMode GetTouchInteractionMode() const { return mTouchInteractionMode; }
+   void SetShowTouchTooltips(bool show) { mShowTouchTooltips = show; }
+   bool ShouldTouchAlwaysClick(int x, int y);
    void FilesDropped(std::vector<std::string> files, int x, int y);
 
    void AddExtraPoller(IPollable* poller);
@@ -228,6 +239,7 @@ public:
    IDrawableModule* GetLastClickedModule() const;
    EffectFactory* GetEffectFactory() { return &mEffectFactory; }
    const std::vector<IDrawableModule*>& GetGroupSelectedModules() const { return mGroupSelectedModules; }
+   void DeleteGroupSelectedModules();
    void SetGroupSelectedModules(std::list<IDrawableModule*> modules);
    bool ShouldAccentuateActiveModules() const;
    bool ShouldDimModule(IDrawableModule* module);
@@ -280,12 +292,15 @@ public:
    static void DumpStats(bool isCrash, void* crashContext);
 
    void SaveLayout(std::string jsonFile = "", bool makeDefaultLayout = true);
+   void SaveLayout(const SaveTarget& target, bool makeDefaultLayout = true);
    ofxJSONElement GetLayout();
    void SaveLayoutAsPopup();
    void SaveOutput();
    void LoadState(std::string file);
+   void LoadState(const SaveTarget& target);
    static void LoadStateHeader(FileStreamIn& in, unsigned char*& screenshotData, int& screenshotSize, std::string& jsonLayoutString);
    void SetStartupSaveStateFile(std::string bskPath);
+   void OpenSaveStateFile(std::string bskPath); //loads now if we're running, or at startup if we're not yet
    void SaveCurrentState();
    void SaveStatePopup();
    void LoadStatePopup();
@@ -298,7 +313,7 @@ public:
    UserPrefsEditor* GetUserPrefsEditor() { return mUserPrefsEditor; }
    juce::Component* GetFileChooserParent() const;
 
-   const juce::String& GetTextFromClipboard() const;
+   const juce::String& GetTextFromClipboard();
    void CopyTextToClipboard(const juce::String& text);
 
    void SetFatalError(std::string error);
@@ -319,6 +334,7 @@ public:
 
 private:
    void SaveState(std::string file, bool autosave);
+   void SaveState(const SaveTarget& target, bool autosave);
    void CompleteQueuedSaveState();
    void ReconnectMidiDevices();
    void DrawConsole();
@@ -340,7 +356,7 @@ private:
    struct QueuedSaveStateInfo
    {
       bool mQueued{ false };
-      std::string mFile{};
+      SaveTarget mTarget{};
       bool mAutosave{ false };
       bool mWaitingForScreenshot{ true };
    };
@@ -363,6 +379,9 @@ private:
    ofVec2f mLastMoveMouseScreenPos;
    ofVec2f mLastMouseDragPos;
    bool mIsMousePanning{ false };
+   std::atomic<int> mResamplingDeviceSampleRate{ 0 };
+   std::atomic<bool> mShowTouchTooltips{ false }; //there's no hover on a touchscreen, so on iOS tooltips only show while inspecting with a finger
+   TouchInteractionMode mTouchInteractionMode{ TouchInteractionMode::Click }; //pan/zoom: touches on the canvas pan and pinch-zoom instead of clicking. repatch: cable sources get bigger to be easier to grab
    std::array<bool, 5> mIsMouseButtonHeld{ false };
    struct SpaceMouseInfo
    {
@@ -430,7 +449,9 @@ private:
    std::string mLoadedLayoutPath;
    bool mWantReloadInitialLayout{ false };
    std::string mCurrentSaveStatePath;
+   SaveTarget mCurrentSaveTarget; //how we last saved, which may be the only way to write to mCurrentSaveStatePath again
    std::string mStartupSaveStateFile;
+   std::string mPendingSaveStateFile; //opened while running, loaded on the next poll
 
    Sample* mHeldSample{ nullptr };
 
@@ -489,6 +510,7 @@ private:
    std::unique_ptr<juce::KnownPluginList> mKnownPluginList;
 
    NVGLUframebuffer* mScreenshotFrameBuffer{ nullptr };
+   int mScreenshotFrameBufferContextGeneration{ -1 }; //see gNanoVGContextGeneration
    unsigned char* mScreenshotPixels{ nullptr };
 
    ofxJSONElement mWorkspaceData;

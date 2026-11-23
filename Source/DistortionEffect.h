@@ -52,12 +52,14 @@ public:
 
    void CheckboxUpdated(Checkbox* checkbox, double time) override;
    void FloatSliderUpdated(FloatSlider* slider, float oldVal, double time) override;
-   void DropdownUpdated(DropdownList* list, int oldVal, double time) override {}
+   void DropdownUpdated(DropdownList* list, int oldVal, double time) override;
+
+   bool LoadOldControl(FileStreamIn& in, std::string& oldName) override;
 
    bool IsEnabled() const override { return mEnabled; }
 
 private:
-   enum DistortionType
+   enum class DistortionType
    {
       kClean,
       kWarm,
@@ -68,21 +70,36 @@ private:
       kGrungy
    };
 
+   enum class PreDistortionFilter
+   {
+      kNone,
+      kCenterInput,
+      kDistortLows,
+      kDistortHighs
+   };
+
    //IDrawableModule
    void DrawModule() override;
 
+   void UpdateFilter();
+
+   PreDistortionFilter mPreDistortionFilter{ PreDistortionFilter::kCenterInput };
    DistortionType mType{ DistortionType::kClean };
    float mClip{ 1 };
    float mGain{ 1 };
    float mPreamp{ 1 };
    float mFuzzAmount{ 0 };
-   bool mRemoveInputDC{ false };
 
+   DropdownList* mPreDistortionFilterSelector{ nullptr };
+   FloatSlider* mPassFreqSlider{ nullptr };
    DropdownList* mTypeDropdown{ nullptr };
    FloatSlider* mClipSlider{ nullptr };
    FloatSlider* mPreampSlider{ nullptr };
-   Checkbox* mRemoveInputDCCheckbox{ nullptr };
    FloatSlider* mFuzzAmountSlider{ nullptr };
+   BiquadFilter mPreFilter[ChannelBuffer::kMaxNumChannels]{};
    BiquadFilter mDCRemover[ChannelBuffer::kMaxNumChannels]{};
    PeakTracker mPeakTracker[ChannelBuffer::kMaxNumChannels]{};
+
+   float mNoDistortionLevel{ 0.0f };
+   float mDistortionInputLevel{ 0.0f };
 };

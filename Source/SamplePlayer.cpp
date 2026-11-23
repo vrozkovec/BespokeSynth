@@ -155,6 +155,7 @@ void SamplePlayer::Poll()
 {
    IDrawableModule::Poll();
 
+#if !BESPOKE_MOBILE
    const juce::String& clipboard = TheSynth->GetTextFromClipboard();
    if (clipboard.contains("youtube"))
    {
@@ -176,6 +177,7 @@ void SamplePlayer::Poll()
       mYoutubeId = "";
       mDownloadYoutubeButton->SetShowing(false);
    }
+#endif
 
    if (mRunningProcess != nullptr)
    {
@@ -400,7 +402,7 @@ void SamplePlayer::PlayNote(NoteMessage note)
    }
 
    if (note.velocity > 0 && mSample != nullptr)
-      PlayCuePoint(note.time, note.pitch, note.velocity, note.modulation.pitchBend ? exp2(note.modulation.pitchBend->GetValue(0)) : 1, (note.modulation.modWheel ? note.modulation.modWheel->GetValue(0) : ModulationParameters::kDefaultModWheel) - ModulationParameters::kDefaultModWheel);
+      PlayCuePoint(note.time, note.pitch, note.velocity, note.modulation.pan, note.modulation.pitchBend ? exp2(note.modulation.pitchBend->GetValue(0)) : 1, (note.modulation.modWheel ? note.modulation.modWheel->GetValue(0) : ModulationParameters::kDefaultModWheel) - ModulationParameters::kDefaultModWheel);
 
    if (note.velocity == 0 && mStopOnNoteOff)
    {
@@ -411,16 +413,17 @@ void SamplePlayer::PlayNote(NoteMessage note)
 void SamplePlayer::OnPulse(double time, float velocity, int flags)
 {
    if (mSample != nullptr)
-      PlayCuePoint(time, -1, velocity * 127, 1, 0);
+      PlayCuePoint(time, -1, velocity * 127, 0, 1, 0);
 }
 
-void SamplePlayer::PlayCuePoint(double time, int index, int velocity, float speedMult, float startOffsetSeconds)
+void SamplePlayer::PlayCuePoint(double time, int index, int velocity, float pan, float speedMult, float startOffsetSeconds)
 {
    if (mSample != nullptr)
    {
       float startSeconds, lengthSeconds, speed;
       GetPlayInfoForPitch(index, startSeconds, lengthSeconds, speed, mStopOnNoteOff);
       mSample->SetPlayPosition((startSeconds + startOffsetSeconds) * gSampleRate * mSample->GetSampleRateRatio());
+      mSample->SetPan(pan);
       mCuePointSpeed = speed * speedMult;
       mPlay = true;
       mAdsr.Clear();
@@ -591,7 +594,7 @@ void SamplePlayer::ButtonClicked(ClickButton* button, double time)
    }
 
    if (button == mPlayCurrentCuePointButton)
-      PlayCuePoint(time, mActiveCuePointIndex, 127, 1, 0);
+      PlayCuePoint(time, mActiveCuePointIndex, 127, 0, 1, 0);
 
    if (button == mAutoSlice4)
       AutoSlice(4);
@@ -603,7 +606,7 @@ void SamplePlayer::ButtonClicked(ClickButton* button, double time)
       AutoSlice(32);
 
    if (button == mPlayHoveredClipButton)
-      PlayCuePoint(time, mHoveredCuePointIndex, 127, 1, 0);
+      PlayCuePoint(time, mHoveredCuePointIndex, 127, 0, 1, 0);
    if (button == mGrabHoveredClipButton)
    {
       ChannelBuffer* data = GetCueSampleData(mHoveredCuePointIndex);
@@ -742,30 +745,27 @@ void SamplePlayer::LoadFile()
    auto file_pattern = TheSynth->GetAudioFormatManager().getWildcardForAllFormats();
    if (File::areFileNamesCaseSensitive())
       file_pattern += ";" + file_pattern.toUpperCase();
-   bool isNativeFileChooser = !UserPrefs.force_juce_file_chooser.Get();
-   FileChooser chooser("Load sample", File(ofToSamplePath("")),
-                       file_pattern, isNativeFileChooser, false, TheSynth->GetFileChooserParent());
-   if (chooser.browseForFileToOpen())
+   auto onChosen = [this](const juce::FileChooser& chooser)
    {
-      auto file = chooser.getResult();
+      auto file = GetChosenFileForReading(chooser);
 
       Sample* sample = new Sample();
       if (file.existsAsFile())
          sample->Read(file.getFullPathName().toStdString().c_str());
       UpdateSample(sample, true);
-   }
+   };
+   BrowseForFileToOpen("Load sample", File(ofToSamplePath("")), file_pattern, onChosen);
 }
 
 void SamplePlayer::SaveFile()
 {
-   bool isNativeFileChooser = !UserPrefs.force_juce_file_chooser.Get();
-   FileChooser chooser("Save sample", File(ofToSamplePath("")),
-                       "*.wav", isNativeFileChooser, false, TheSynth->GetFileChooserParent());
-   if (chooser.browseForFileToSave(true))
+   auto onChosen = [this](const juce::FileChooser& chooser)
    {
-      auto file = chooser.getResult();
-      Sample::WriteDataToFile(file.getFullPathName().toStdString().c_str(), mSample->Data(), mSample->LengthInSamples());
-   }
+      SaveTarget target(chooser);
+      Sample::WriteDataToFile(target.GetWritePath(), mSample->Data(), mSample->LengthInSamples());
+      target.Commit();
+   };
+   BrowseForFileToSave("Save sample", File(ofToSamplePath("")), "*.wav", onChosen);
 }
 
 void SamplePlayer::FillData(std::vector<float> data)
@@ -950,6 +950,11 @@ void SamplePlayer::DrawModule()
       return;
 
    mTrimToZoomButton->SetShowing(mZoomLevel != 1);
+
+#if BESPOKE_MOBILE
+   mDownloadYoutubeSearch->SetShowing(false);
+   mDownloadYoutubeButton->SetShowing(false);
+#endif
 
    mVolumeSlider->Draw();
    mSpeedSlider->Draw();

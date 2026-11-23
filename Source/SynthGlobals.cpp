@@ -43,6 +43,9 @@
 #include "juce_audio_formats/juce_audio_formats.h"
 #include "juce_gui_basics/juce_gui_basics.h"
 #include "nanovg/nanovg.h"
+#if BESPOKE_ANDROID
+#include "AndroidSupport.h"
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -94,6 +97,7 @@ std::array<float, (int)StepVelocityType::NumVelocityLevels> gStepVelocityLevels{
 
 std::array<NVGcontext*, (int)NanoVGRenderContext::Num> gNanoVGRenderContexts{};
 NVGcontext* gNanoVG = nullptr;
+int gNanoVGContextGeneration = 0;
 
 std::random_device gRandomDevice;
 bespoke::core::Xoshiro256ss gRandom(gRandomDevice);
@@ -200,19 +204,21 @@ void DrawAudioBuffer(float width, float height, const float* buffer, float start
    if (buffer && length > 0)
    {
       const float halfH = height * 0.5f;
-      const int pixelWidth = (int)fabsf(width);
-      const float direction = (width > 0) ? 1.f : -1.f;
+      const int pixelWidth = (int)width;
       const float samplesPerPixel = length / pixelWidth;
-      const int innerStride = MAX(1, (int)(samplesPerPixel / 100));
+      const int innerStride = 1; //MAX(1, (int)(samplesPerPixel / 100));
+
+      // fix "crawling" effect by quantizing displayed start sample
+      start -= int(start) % int(samplesPerPixel);
 
       // pass 1: gather per-column min/max
       float highestMagnitude = 0;
 
-      for (int px = 0; px < pixelWidth; ++px)
+      for (int x = 0; x < pixelWidth; ++x)
       {
          float max = -999;
          float min = 999;
-         int sampleStart = (int)(px * samplesPerPixel + start);
+         int sampleStart = (int)(x * samplesPerPixel + start);
          int sampleCount = MAX(1, (int)samplesPerPixel);
 
          for (int j = 0; j < sampleCount; j += innerStride)
@@ -222,16 +228,18 @@ void DrawAudioBuffer(float width, float height, const float* buffer, float start
                sampleIdx = sampleIdx - wraparoundFrom + wraparoundTo;
             if (bufferSize > 0)
                sampleIdx = ((sampleIdx % bufferSize) + bufferSize) % bufferSize;
+            else if (sampleIdx > end - 1)
+               sampleIdx = end - 1;
             max = MAX(max, buffer[sampleIdx]);
             min = MIN(min, buffer[sampleIdx]);
          }
 
          highestMagnitude = MAX(highestMagnitude, MAX(fabsf(max), fabsf(min)));
 
-         if (px < (int)sAudioBufferMinValues.size())
+         if (x < (int)sAudioBufferMinValues.size())
          {
-            sAudioBufferMaxValues[px] = max;
-            sAudioBufferMinValues[px] = min;
+            sAudioBufferMaxValues[x] = max;
+            sAudioBufferMinValues[x] = min;
          }
       }
 
@@ -243,9 +251,9 @@ void DrawAudioBuffer(float width, float height, const float* buffer, float start
       ofSetColor(color);
       nvgBeginPath(gNanoVG);
 
-      for (int px = 0; px < pixelWidth; ++px)
+      for (int x = 0; x < pixelWidth; ++x)
       {
-         int rangeIndex = std::min(px, (int)sAudioBufferMinValues.size() - 1);
+         int rangeIndex = std::min(x, (int)sAudioBufferMinValues.size() - 1);
          float max = sAudioBufferMaxValues[rangeIndex] * halfH * vol * rescale;
          float min = sAudioBufferMinValues[rangeIndex] * halfH * vol * rescale;
 
@@ -258,7 +266,6 @@ void DrawAudioBuffer(float width, float height, const float* buffer, float start
             min -= .05f;
          }
 
-         float x = px * direction;
          nvgMoveTo(gNanoVG, x, halfH - max);
          nvgLineTo(gNanoVG, x, halfH - min);
       }
@@ -268,8 +275,8 @@ void DrawAudioBuffer(float width, float height, const float* buffer, float start
       if (pos != -1)
       {
          ofSetColor(0, 255, 0);
-         float px = ofMap(pos, start, end, 0, width, true);
-         ofLine(px, 0, px, height);
+         float x = ofMap(pos, start, end, 0, width, true);
+         ofLine(x, 0, x, height);
       }
    }
 
@@ -630,6 +637,16 @@ int GetScrollSteps(float scroll, bool isSmoothScroll, float& accumulator, float 
    return steps;
 }
 
+namespace
+{
+   bool sIgnoreCharacterModifiers = false;
+}
+
+void SetIgnoreCharacterModifiers(bool ignore)
+{
+   sIgnoreCharacterModifiers = ignore;
+}
+
 int GetKeyModifiers()
 {
    int ret = 0;
@@ -643,6 +660,14 @@ int GetKeyModifiers()
 #endif
    if (ModifierKeys::currentModifiers.isCommandDown())
       ret |= kModifier_Command;
+   if (sIgnoreCharacterModifiers)
+   {
+      //the alt (or altgr, which windows reports as ctrl+alt) held to type the current character isn't a shortcut chord
+      ret &= ~kModifier_Alt;
+#if BESPOKE_WINDOWS
+      ret &= ~kModifier_Command;
+#endif
+   }
    return ret;
 }
 
@@ -652,6 +677,14 @@ bool IsKeyHeld(int key, int modifiers)
           KeyPress::isKeyCurrentlyDown(key) &&
           GetKeyModifiers() == modifiers &&
           TheSynth->GetMainComponent()->hasKeyboardFocus(true);
+}
+
+int KeyToUpper(int key)
+{
+   //toupper() is only defined for values that fit in an unsigned char, and typed characters can be wider
+   if (key >= 0 && key < CHAR_MAX)
+      return toupper(key);
+   return key;
 }
 
 int KeyToLower(int key)
@@ -1109,6 +1142,29 @@ ofLog::~ofLog()
 {
    std::string output = ofToString(gTime / 1000, 8) + ": " + mMessage;
    DBG(output);
+#if BESPOKE_ANDROID
+   AndroidSupport::Log(output.c_str());
+#endif
+#if BESPOKE_IOS
+   {
+      //DBG is compiled out of release builds, and there's no easy way to see stdout on a device, so log to a file that can be pulled off with devicectl
+      static juce::CriticalSection sLogFileLock;
+      static FILE* sLogFile = nullptr;
+      juce::ScopedLock lock(sLogFileLock);
+      if (sLogFile == nullptr)
+      {
+         //don't use ofToDataPath() here: its first call runs UpdateUserData(), which logs, and re-entering its static initializer aborts
+         juce::File logFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("BespokeSynth").getChildFile("log.txt");
+         logFile.getParentDirectory().createDirectory();
+         sLogFile = fopen(logFile.getFullPathName().toRawUTF8(), "w");
+      }
+      if (sLogFile != nullptr)
+      {
+         fprintf(sLogFile, "%s\n", output.c_str());
+         fflush(sLogFile);
+      }
+   }
+#endif
    if (mSendToBespokeConsole)
       TheSynth->LogEvent(output, kLogEventType_Verbose);
 }

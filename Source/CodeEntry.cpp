@@ -37,16 +37,20 @@
 #undef ssize_t
 #endif
 
+#if BESPOKE_PYTHON_SUPPORT
 #include "leathers/push"
 #include "leathers/unused-value"
 #include "leathers/range-loop-analysis"
 #include "pybind11/embed.h"
 #include "pybind11/stl.h"
 #include "leathers/pop"
+#endif
 
 #include "juce_gui_basics/juce_gui_basics.h"
 
+#if BESPOKE_PYTHON_SUPPORT
 namespace py = pybind11;
+#endif
 
 //static
 bool CodeEntry::sWarnJediNotInstalled = false;
@@ -76,6 +80,7 @@ void CodeEntry::Poll()
    {
       if (mDoSyntaxHighlighting && sDoSyntaxHighlighting)
       {
+#if BESPOKE_PYTHON_SUPPORT
          try
          {
             py::globals()["syntax_highlight_code"] = GetVisibleCode();
@@ -86,6 +91,7 @@ void CodeEntry::Poll()
          {
             ofLog() << "syntax highlight execution exception: " << e.what();
          }
+#endif
       }
       else
       {
@@ -98,6 +104,7 @@ void CodeEntry::Poll()
       mCodeUpdated = false;
    }
 
+#if BESPOKE_PYTHON_SUPPORT
    if (mAutocompleteUpdateTimer > 0)
    {
       mAutocompleteUpdateTimer -= 1.0 / ofGetFrameRate();
@@ -235,6 +242,7 @@ void CodeEntry::Poll()
          }
       }
    }
+#endif
 }
 
 void CodeEntry::Render()
@@ -597,6 +605,7 @@ std::string CodeEntry::FilterText(std::string input, std::vector<int> mapping, i
 //static
 void CodeEntry::OnPythonInit()
 {
+#if BESPOKE_PYTHON_SUPPORT
    const std::string syntaxHighlightCode = R"(def syntax_highlight_basic():
    #this uses the built in lexer/tokenizer in python to identify part of code
    #will return a meaningful lookuptable for index colours per character
@@ -730,6 +739,7 @@ void CodeEntry::OnPythonInit()
       ofLog() << "maybe jedi is not installed? if you want autocompletion, use \"python -m pip install jedi\" in your system console to install";
       sWarnJediNotInstalled = true;
    }
+#endif
 }
 
 void CodeEntry::OnCodeUpdated()
@@ -948,7 +958,7 @@ void CodeEntry::OnKeyPressed(int key, bool isRepeat)
          AddString(tab);
       }
    }
-   else if (toupper(key) == 'V' && GetKeyModifiers() == kModifier_Command)
+   else if (KeyToUpper(key) == 'V' && GetKeyModifiers() == kModifier_Command)
    {
       if (mCaretPosition != mCaretPosition2)
          RemoveSelectedText();
@@ -956,7 +966,7 @@ void CodeEntry::OnKeyPressed(int key, bool isRepeat)
       juce::String clipboard = TheSynth->GetTextFromClipboard();
       AddString(clipboard.toStdString());
    }
-   else if (toupper(key) == 'V' && (GetKeyModifiers() == (kModifier_Command | kModifier_Shift)))
+   else if (KeyToUpper(key) == 'V' && (GetKeyModifiers() == (kModifier_Command | kModifier_Shift)))
    {
       IClickable* pasteName = nullptr;
       if (gHoveredUIControl != nullptr)
@@ -972,7 +982,7 @@ void CodeEntry::OnKeyPressed(int key, bool isRepeat)
          AddString(insert);
       }
    }
-   else if ((toupper(key) == 'C' || toupper(key) == 'X') && GetKeyModifiers() == kModifier_Command)
+   else if ((KeyToUpper(key) == 'C' || KeyToUpper(key) == 'X') && GetKeyModifiers() == kModifier_Command)
    {
       if (mCaretPosition != mCaretPosition2)
       {
@@ -980,19 +990,19 @@ void CodeEntry::OnKeyPressed(int key, bool isRepeat)
          int caretEnd = MAX(mCaretPosition, mCaretPosition2);
          TheSynth->CopyTextToClipboard(mString.substr(caretStart, caretEnd - caretStart));
 
-         if (toupper(key) == 'X')
+         if (KeyToUpper(key) == 'X')
             RemoveSelectedText();
       }
    }
-   else if (toupper(key) == 'Z' && GetKeyModifiers() == kModifier_Command)
+   else if (KeyToUpper(key) == 'Z' && GetKeyModifiers() == kModifier_Command)
    {
       Undo();
    }
-   else if (toupper(key) == 'Z' && (GetKeyModifiers() == (kModifier_Command | kModifier_Shift)))
+   else if (KeyToUpper(key) == 'Z' && (GetKeyModifiers() == (kModifier_Command | kModifier_Shift)))
    {
       Redo();
    }
-   else if (toupper(key) == 'A' && GetKeyModifiers() == kModifier_Command)
+   else if (KeyToUpper(key) == 'A' && GetKeyModifiers() == kModifier_Command)
    {
       mCaretPosition = 0;
       mCaretPosition2 = (int)mString.size();
@@ -1005,12 +1015,12 @@ void CodeEntry::OnKeyPressed(int key, bool isRepeat)
    {
       MoveCaretToStart();
    }
-   else if (toupper(key) == 'R' && GetKeyModifiers() == kModifier_Command)
+   else if (KeyToUpper(key) == 'R' && GetKeyModifiers() == kModifier_Command)
    {
       Publish();
       mListener->ExecuteCode();
    }
-   else if (toupper(key) == 'R' && GetKeyModifiers() == (kModifier_Command | kModifier_Shift))
+   else if (KeyToUpper(key) == 'R' && GetKeyModifiers() == (kModifier_Command | kModifier_Shift))
    {
       Publish();
       int lineStart = MIN(GetCaretCoords(mCaretPosition).y, GetCaretCoords(mCaretPosition2).y);

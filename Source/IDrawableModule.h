@@ -139,6 +139,7 @@ public:
    bool IsVisible();
    std::vector<IDrawableModule*> GetChildren() const { return mChildren; }
    virtual bool IsResizable() const { return false; }
+   virtual bool ShouldSaveSize() const { return IsResizable(); }
    virtual void Resize(float width, float height)
    {
       mWidth = width;
@@ -257,6 +258,9 @@ private:
    virtual void SaveLayout(ofxJSONElement& moduleInfo) {}
    virtual void SetUpFromSaveData() {}
    virtual bool ShouldSavePatchCableSources() const { return true; }
+   virtual bool ShouldShowTriangleMenu() const { return true; }
+   virtual bool ShouldShowReceiveIndicators() const { return true; }
+   virtual bool ShouldForceExactDimensions() const { return false; }
    void ForcePosition();
 
    std::vector<IUIControl*> mUIControls;

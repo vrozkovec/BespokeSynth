@@ -53,13 +53,14 @@ void UserPrefsEditor::CreateUIControls()
    for (auto* pref : UserPrefs.mUserPrefs)
       pref->SetUpControl(this);
 
-   mCategorySelector = new RadioButton(this, "category", 5, 10, (int*)(&mCategory), kRadioHorizontal);
-   mSaveButton = new ClickButton(this, "save", -1, -1);
-   mCancelButton = new ClickButton(this, "cancel", -1, -1);
+   mSaveButton = new ClickButton(this, "save", 5, 3);
+   mCancelButton = new ClickButton(this, "cancel", mSaveButton, kAnchor_Right_Padded);
+   mCategorySelector = new RadioButton(this, "category", mSaveButton, kAnchor_Below_Padded, (int*)(&mCategory), kRadioHorizontal);
 
    mCategorySelector->AddLabel("general", (int)UserPrefCategory::General);
    mCategorySelector->AddLabel("graphics", (int)UserPrefCategory::Graphics);
    mCategorySelector->AddLabel("paths", (int)UserPrefCategory::Paths);
+   mCategorySelector->AddLabel("advanced", (int)UserPrefCategory::Advanced);
 
    std::array<int, 5> oversampleAmounts = { 1, 2, 4, 8, 16 };
    for (auto& oversample : oversampleAmounts)
@@ -189,6 +190,17 @@ void UserPrefsEditor::UpdateDropdowns(std::vector<DropdownList*> toUpdate)
       }
    }
 
+#if BESPOKE_MOBILE
+   if (toUpdate.empty() || VectorContains(UserPrefs.audio_input_device.GetDropdown(), toUpdate))
+   {
+      //iOS has a single combined device, so the only choice is whether to open its input. any value other than "none" does
+      //(see MainComponent's GetInputDeviceName), and iOS picks the microphone or a connected interface itself
+      UserPrefs.audio_input_device.GetDropdown()->Clear();
+      UserPrefs.audio_input_device.GetDropdown()->AddLabel("none", -2);
+      UserPrefs.audio_input_device.GetDropdown()->AddLabel("auto", -1);
+      UserPrefs.audio_input_device.GetIndex() = UserPrefs.audio_input_device.Get() == "none" ? -2 : -1;
+   }
+#else
    if (toUpdate.empty() || VectorContains(UserPrefs.audio_input_device.GetDropdown(), toUpdate))
    {
       UserPrefs.audio_input_device.GetIndex() = -1;
@@ -203,7 +215,8 @@ void UserPrefsEditor::UpdateDropdowns(std::vector<DropdownList*> toUpdate)
          UserPrefs.audio_input_device.GetDropdown()->AddLabel(inputDevice.toStdString(), i);
          if (deviceManager.getCurrentAudioDevice() != nullptr &&
              i == selectedDeviceType->getIndexOfDevice(deviceManager.getCurrentAudioDevice(), true) &&
-             UserPrefs.audio_input_device.Get() != "auto")
+             UserPrefs.audio_input_device.Get() != "auto" &&
+             UserPrefs.audio_input_device.Get() != "none") //otherwise, single-device systems like iOS would switch "none" to the device (and enable the microphone) on save
             UserPrefs.audio_input_device.GetIndex() = i;
          ++i;
       }
@@ -217,6 +230,7 @@ void UserPrefsEditor::UpdateDropdowns(std::vector<DropdownList*> toUpdate)
          }
       }
    }
+#endif
 
    juce::String outputDeviceName;
    if (UserPrefs.audio_output_device.GetIndex() >= 0)
@@ -239,7 +253,10 @@ void UserPrefsEditor::UpdateDropdowns(std::vector<DropdownList*> toUpdate)
 
    auto* selectedDevice = deviceManager.getCurrentAudioDevice();
    auto setup = deviceManager.getAudioDeviceSetup();
-   if (selectedDevice == nullptr || selectedDevice->getTypeName() != selectedDeviceType->getTypeName() || setup.outputDeviceName != outputDeviceName || setup.inputDeviceName != inputDeviceName)
+   //combined devices have no input name of their own, and iOS leaves it empty when the input is "none". creating a second device on iOS
+   //isn't harmless: it changes the shared audio session's category, which silently stops the running device
+   bool inputDeviceMatches = !selectedDeviceType->hasSeparateInputsAndOutputs() || setup.inputDeviceName == inputDeviceName;
+   if (selectedDevice == nullptr || selectedDevice->getTypeName() != selectedDeviceType->getTypeName() || setup.outputDeviceName != outputDeviceName || !inputDeviceMatches)
       selectedDevice = selectedDeviceType->createDevice(outputDeviceName, inputDeviceName);
 
    if (selectedDevice == nullptr)
@@ -264,7 +281,14 @@ void UserPrefsEditor::UpdateDropdowns(std::vector<DropdownList*> toUpdate)
       UserPrefs.buffersize.GetIndex() = -1;
       UserPrefs.buffersize.GetDropdown()->Clear();
       i = 0;
-      for (auto& bufferSize : selectedDevice->getAvailableBufferSizes())
+#if BESPOKE_MOBILE
+      //iOS treats buffer sizes as approximate hints and reports odd values (like 65) back, so offer
+      //standard sizes instead. our audio callback regroups whatever iOS delivers into this block size.
+      juce::Array<int> availableBufferSizes{ 64, 128, 256, 512, 1024, 2048 };
+#else
+      juce::Array<int> availableBufferSizes = selectedDevice->getAvailableBufferSizes();
+#endif
+      for (auto& bufferSize : availableBufferSizes)
       {
          UserPrefs.buffersize.GetDropdown()->AddLabel(ofToString(bufferSize), i);
          if (bufferSize == gBufferSize / UserPrefs.oversampling.Get())
@@ -291,8 +315,10 @@ void UserPrefsEditor::DrawModule()
    {
       bool onPage = pref->mCategory == mCategory;
       bool hide = false;
+#if !BESPOKE_MOBILE //on iOS, it chooses whether to open the input at all
       if (pref == &UserPrefs.audio_input_device)
          hide = !selectedDeviceType->hasSeparateInputsAndOutputs();
+#endif
       if (pref == &UserPrefs.position_x || pref == &UserPrefs.position_y)
          hide = !UserPrefs.set_manual_window_position.Get();
 
@@ -315,9 +341,7 @@ void UserPrefsEditor::DrawModule()
          controlY += 17;
    }
    controlY += 17;
-   mSaveButton->SetPosition(controlX, controlY);
    mSaveButton->Draw();
-   mCancelButton->SetPosition(mSaveButton->GetRect(K(local)).getMaxX() + 10, controlY);
    mCancelButton->Draw();
    mWidth = 1150;
    mHeight = controlY + 20;
@@ -325,6 +349,7 @@ void UserPrefsEditor::DrawModule()
    if (UserPrefs.devicetype.GetDropdown()->GetLabel(UserPrefs.devicetype.GetIndex()) == "DirectSound")
       DrawRightLabel(UserPrefs.devicetype.GetControl(), "warning: DirectSound can cause crackle and strange behavior for some sample rates and buffer sizes", ofColor::yellow);
 
+#if !BESPOKE_MOBILE //on iOS, this would overlap the input dropdown, which stays visible
    if (!selectedDeviceType->hasSeparateInputsAndOutputs() && mCategory == UserPrefCategory::General)
    {
       ofRectangle rect = UserPrefs.audio_output_device.GetControl()->GetRect(true);
@@ -333,6 +358,7 @@ void UserPrefsEditor::DrawModule()
       DrawTextNormal("note: " + UserPrefs.devicetype.GetDropdown()->GetLabel(UserPrefs.devicetype.GetIndex()) + " uses the same audio device for output and input", rect.x, rect.getMaxY() + 14, 11);
       ofPopStyle();
    }
+#endif
 
    if (UserPrefs.samplerate.GetDropdown()->GetNumValues() == 0)
    {
@@ -421,7 +447,16 @@ void UserPrefsEditor::Save()
 
    juce::File file(TheSynth->GetUserPrefsPath());
    file.create();
-   file.replaceWithText(output);
+   if (!file.replaceWithText(output))
+   {
+      //replaceWithText writes a temporary file next to this one and renames it over it, which fails if we can't create files in
+      //the folder (e.g. its permissions were changed by a tool that copied files onto the device), even when this file is writable
+      juce::FileOutputStream stream(file);
+      bool written = stream.openedOk() && stream.setPosition(0) && stream.truncate().wasOk() && stream.writeText(output, false, false, nullptr);
+      stream.flush();
+      if (!written || stream.getStatus().failed())
+         TheSynth->LogEvent("couldn't save " + file.getFullPathName().toStdString(), kLogEventType_Error);
+   }
 
    if (TheSynth->HasFatalError()) //this popup spawned at load due to a bad init setting. in this case, the button says "save and exit"
       juce::JUCEApplicationBase::quit();

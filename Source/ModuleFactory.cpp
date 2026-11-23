@@ -157,6 +157,7 @@
 #include "Ramper.h"
 #include "NoteGate.h"
 #include "Prefab.h"
+#include "PrefabPort.h"
 #include "NoteHumanizer.h"
 #include "VolcaBeatsControl.h"
 #include "RadioSequencer.h"
@@ -274,7 +275,6 @@
 #include "DopplerShift.h"
 #include "StereoRotation.h"
 #include "LatencyCalculator.h"
-#include "AbletonMoveControl.h"
 #include "TrackOrganizer.h"
 #include "ModulatorBinaryValue.h"
 #include "VelocityToDuration.h"
@@ -284,6 +284,9 @@
 #include "AudioSyncer.h"
 #include "ChordKeyboard.h"
 #include "TapeLooper.h"
+#include "DiscontinuitySmoother.h"
+#include "ControlSurface.h"
+#include "FreqSplitter.h"
 
 #include <juce_core/juce_core.h>
 
@@ -513,7 +516,6 @@ ModuleFactory::ModuleFactory()
    REGISTER(StereoRotation, stereorotation, kModuleCategory_Audio);
    REGISTER(LatencyCalculatorSender, latencycalculator, kModuleCategory_Synth);
    REGISTER(LatencyCalculatorReceiver, latencycalculatorreceiver, kModuleCategory_Audio);
-   REGISTER(AbletonMoveControl, abletonmovecontrol, kModuleCategory_Other);
    REGISTER(TrackOrganizer, trackorganizer, kModuleCategory_Other);
    REGISTER(ModulatorBinaryValue, binaryvalue, kModuleCategory_Modulator);
    REGISTER(VelocityToDuration, velocitytoduration, kModuleCategory_Note);
@@ -523,6 +525,9 @@ ModuleFactory::ModuleFactory()
    REGISTER(AudioSyncer, audiosyncer, kModuleCategory_Audio);
    REGISTER(ChordKeyboard, chordkeyboard, kModuleCategory_Note);
    REGISTER(TapeLooper, tapelooper, kModuleCategory_Audio);
+   REGISTER(DiscontinuitySmoother, discontinuitysmoother, kModuleCategory_Audio)
+   REGISTER(ControlSurface, controlsurface, kModuleCategory_Other);
+   REGISTER(FreqSplitter, freqsplitter, kModuleCategory_Audio);
 
    //REGISTER_EXPERIMENTAL(MidiPlayer, midiplayer, kModuleCategory_Instrument);
    REGISTER_HIDDEN(Autotalent, autotalent, kModuleCategory_Audio);
@@ -539,6 +544,14 @@ ModuleFactory::ModuleFactory()
    REGISTER_HIDDEN(PanicButton, panicbutton, kModuleCategory_Other);
    REGISTER_HIDDEN(DebugAudioSource, debugaudiosource, kModuleCategory_Synth);
    REGISTER_HIDDEN(FollowingSong, followingsong, kModuleCategory_Synth);
+   REGISTER_HIDDEN(PrefabAudioInlet, prefabaudioin, kModuleCategory_Audio);
+   REGISTER_HIDDEN(PrefabAudioOutlet, prefabaudioout, kModuleCategory_Audio);
+   REGISTER_HIDDEN(PrefabNoteInlet, prefabnotein, kModuleCategory_Note);
+   REGISTER_HIDDEN(PrefabNoteOutlet, prefabnoteout, kModuleCategory_Note);
+   REGISTER_HIDDEN(PrefabPulseInlet, prefabpulsein, kModuleCategory_Pulse);
+   REGISTER_HIDDEN(PrefabPulseOutlet, prefabpulseout, kModuleCategory_Pulse);
+   REGISTER_HIDDEN(PrefabModulationInlet, prefabmodin, kModuleCategory_Modulator);
+   REGISTER_HIDDEN(PrefabModulationOutlet, prefabmodout, kModuleCategory_Modulator);
    REGISTER_HIDDEN(BeatBloks, beatbloks, kModuleCategory_Synth);
    REGISTER_HIDDEN(FilterViz, filterviz, kModuleCategory_Other);
    REGISTER_HIDDEN(FreqDomainBoilerplate, freqdomainboilerplate, kModuleCategory_Audio);
@@ -864,6 +877,9 @@ std::string ModuleFactory::FixUpTypeName(std::string name)
 
    if (name == "arpsequencer")
       return "rhythmsequencer";
+
+   if (name == "abletonmovecontrol")
+      return "controlsurface";
 
    return name;
 }

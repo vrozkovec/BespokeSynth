@@ -42,13 +42,17 @@ NBase::Result MoveDisplayBridge::Init()
    std::unique_ptr<MoveDisplay> display{MoveDisplay::create()};
    if (!display)
    {
-     return {"no move support"};
+     return {"no LCD support"};
    }
 
    auto result{display->Init()};
    if (result.Failed())
    {
+#ifdef __ANDROID__
+      return result; // says why, eg that it's waiting for the user to allow usb access
+#else
       return {"no move found"};
+#endif
    }
    MoveDisplay_ = std::move(display);
    return result;

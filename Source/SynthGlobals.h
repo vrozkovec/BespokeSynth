@@ -123,6 +123,10 @@ enum class NanoVGRenderContext
 };
 extern std::array<NVGcontext*, (int)NanoVGRenderContext::Num> gNanoVGRenderContexts;
 extern NVGcontext* gNanoVG;
+//incremented each time the nanovg contexts are created. anything that caches nanovg images or framebuffers should
+//recreate them when this changes, since they belong to the old contexts (android recreates the GL context whenever
+//the app returns to the foreground)
+extern int gNanoVGContextGeneration;
 
 extern std::random_device gRandomDevice;
 
@@ -149,6 +153,13 @@ enum KeyModifiers
    kModifier_Alt = 2,
    kModifier_Control = 4,
    kModifier_Command = 8
+};
+
+enum class TouchInteractionMode
+{
+   Click,
+   PanZoom,
+   Repatch
 };
 
 enum class StepVelocityType
@@ -225,8 +236,10 @@ void UpdateTarget(IDrawableModule* module);
 void DrawLissajous(RollingBuffer* buffer, float x, float y, float w, float h, float r = .2f, float g = .7f, float b = .2f, bool autocorrelationMode = true);
 void StringCopy(char* dest, const char* source, int destLength);
 int GetKeyModifiers();
+void SetIgnoreCharacterModifiers(bool ignore);
 bool IsKeyHeld(int key, int modifiers = kModifier_None);
 int GetScrollSteps(float scroll, bool isSmoothScroll, float& accumulator, float scrollPerStep = 5);
+int KeyToUpper(int key);
 int KeyToLower(int key);
 float EaseIn(float start, float end, float a);
 float EaseOut(float start, float end, float a);

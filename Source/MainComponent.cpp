@@ -14,6 +14,15 @@ using namespace juce;
 #include "Push2Control.h" //TODO(Ryan) remove
 #include "SpaceMouseControl.h"
 #include "UserPrefs.h"
+#include "FixedBlockAudioAdapter.h"
+#if BESPOKE_IOS
+#include "IOSAudioSession.h"
+#include "IOSDiagnostics.h"
+#include "IOSPointerInput.h"
+#endif
+#if BESPOKE_ANDROID
+#include "AndroidSupport.h"
+#endif
 
 #ifdef JUCE_WINDOWS
 #include <windows.h>
@@ -27,6 +36,9 @@ using namespace juce;
 class MainContentComponent : public OpenGLAppComponent,
                              public AudioIODeviceCallback,
                              public FileDragAndDropTarget,
+#if BESPOKE_MOBILE
+                             public TextInputTarget, //lets bespoke's text fields bring up the on-screen keyboard
+#endif
                              private Timer
 {
 public:
@@ -61,7 +73,8 @@ public:
       openGLContext.setComponentPaintingEnabled(false);
 #endif
 
-#ifndef BESPOKE_WINDOWS //windows crash handler is set up in ModularSynth() constructor
+#if !BESPOKE_WINDOWS && !BESPOKE_ANDROID //windows crash handler is set up in ModularSynth() constructor. on android, the system's crash
+      //reporter writes a full backtrace to logcat, which this would prevent (it can't get a backtrace itself there)
       SystemStats::setApplicationCrashHandler(ModularSynth::CrashHandler);
 #endif
 
@@ -101,6 +114,10 @@ public:
       setWantsKeyboardFocus(true);
       Desktop::setScreenSaverEnabled(false);
       mGlobalManagers.mDeviceManager.getAvailableDeviceTypes(); //scans for device types ("Windows Audio", "DirectSound", etc)
+
+#if BESPOKE_ANDROID
+      AndroidSupport::StartAudioService(); //keeps the audio going while bespoke isn't in front
+#endif
    }
 
    ~MainContentComponent()
@@ -111,6 +128,9 @@ public:
       ShutdownBreadcrumb("shutdownOpenGL done");
       shutdownAudio();
       ShutdownBreadcrumb("MainContentComponent members destructing (~ModularSynth next)");
+#if BESPOKE_ANDROID
+      AndroidSupport::StopAudioService();
+#endif	  
    }
 
    void timerCallback() override
@@ -127,6 +147,31 @@ public:
       }
 
       mSynth.Poll();
+
+#if BESPOKE_IOS
+      if (auto* peer = getPeer())
+      {
+         IOSPointerInput::Install(peer->getNativeHandle(), [this](float x, float y, float scaleFactor)
+                                  {
+                                     if (auto* currentPeer = getPeer())
+                                        currentPeer->handleMagnifyGesture(MouseInputSource::InputSourceType::touch, { x, y }, Time::currentTimeMillis(), scaleFactor);
+                                  });
+      }
+#endif
+
+#if BESPOKE_MOBILE
+      mSynth.SetShowTouchTooltips(mSynth.IsTouchNavigationMode() && !mClickTouchIsPointer && Desktop::getInstance().getNumDraggingMouseSources() == 1);
+
+      //show/hide the on-screen keyboard when a bespoke text field gains/loses focus
+      if (isTextInputActive() != mWasTextInputActive)
+      {
+         mWasTextInputActive = isTextInputActive();
+         if (mWasTextInputActive && !hasKeyboardFocus(false))
+            grabKeyboardFocus();
+         if (auto* peer = getPeer())
+            peer->refreshTextInputTarget();
+      }
+#endif
 
 #if DEBUG
       if (sRenderFrame % 2 == 0)
@@ -150,6 +195,31 @@ public:
       mScreenPosition = getScreenPosition();
 
       mSpaceMouseReader.Poll();
+
+#if BESPOKE_IOS
+      /*{
+         //periodic audio diagnostics, since there's no debugger console on device
+         static int sDiagnosticFrame = 0;
+         if (++sDiagnosticFrame % 300 == 0)
+            ofLog() << IOSDiagnostics::GetAudioSessionState() << "   audio callbacks: " << mAudioCallbackCount.load() << "   last size: " << mLastCallbackSize.load() << "   block adapter: " << mUseBlockAdapter.load() << "   resampling: " << mBlockAdapter.IsResampling() << "   device rate: " << (mGlobalManagers.mDeviceManager.getCurrentAudioDevice() ? mGlobalManagers.mDeviceManager.getCurrentAudioDevice()->getCurrentSampleRate() : 0) << "   bespoke rate: " << gSampleRate / UserPrefs.oversampling.Get() << "   paused: " << TheSynth->IsAudioPaused() << "   device: " << (mGlobalManagers.mDeviceManager.getCurrentAudioDevice() ? mGlobalManagers.mDeviceManager.getCurrentAudioDevice()->getName().toStdString() : "null") << "   playing: " << (mGlobalManagers.mDeviceManager.getCurrentAudioDevice() ? mGlobalManagers.mDeviceManager.getCurrentAudioDevice()->isPlaying() : false);
+      }*/
+
+      {
+         //JUCE re-requests its (size + 1) duration after route changes, interruptions, etc, so re-assert ours when callbacks drift.
+         //throttled, so we don't fight iOS when it deliberately uses large buffers (e.g. while the screen is locked)
+         int blockSize = gBufferSize / UserPrefs.oversampling.Get();
+         int lastCallbackSize = mLastCallbackSize.load();
+         double now = juce::Time::getMillisecondCounterHiRes();
+         if (lastCallbackSize != 0 && lastCallbackSize != blockSize && now - mLastBufferSizeRequestTime > 1000)
+         {
+            mLastBufferSizeRequestTime = now;
+            //use the hardware's current rate, which can differ from ours after a route change (e.g. a 44.1k usb device)
+            auto* device = mGlobalManagers.mDeviceManager.getCurrentAudioDevice();
+            double deviceRate = device != nullptr ? device->getCurrentSampleRate() : 0;
+            IOSAudioSession::RequestExactBufferSize(deviceRate > 0 ? deviceRate : gSampleRate / UserPrefs.oversampling.Get(), blockSize);
+         }
+      }
+#endif
 
       if (mAudioDeviceConnectionState == AudioDeviceConnectionState::CheckForDisconnection)
       {
@@ -177,7 +247,26 @@ public:
       // You can use this function to initialise any resources you might need,
       // but be careful - it will be called on the audio thread, not the GUI thread.
 
-      ofLog() << "audioDeviceAboutToStart()";
+      ofLog() << "audioDeviceAboutToStart()" << (device ? "   rate: " + juce::String(device->getCurrentSampleRate()) + "   buffer: " + juce::String(device->getCurrentBufferSizeSamples()) : juce::String());
+#if BESPOKE_ANDROID
+      mDeviceSampleRate = device ? device->getCurrentSampleRate() : 0;
+#endif
+
+      //the device's sample rate can change mid-session (e.g. on iOS, when plugging into a 44.1k-only usb interface).
+      //bespoke's rate is fixed once modules exist, so resample to the device's rate when they differ.
+      //(JUCE holds its callback lock while calling this, so it can't overlap with the audio callback)
+      if (device != nullptr && mBlockAdapter.IsPrepared())
+         UpdateBlockAdapterSampleRate(device->getCurrentSampleRate());
+   }
+
+   void UpdateBlockAdapterSampleRate(double deviceSampleRate)
+   {
+      mBlockAdapter.SetSampleRates(gSampleRate / UserPrefs.oversampling.Get(), deviceSampleRate);
+      mBlockAdapter.Reset();
+      mMatchingCallbackCount = 0;
+      if (mBlockAdapter.IsResampling())
+         mUseBlockAdapter = true;
+      mSynth.SetResamplingDeviceSampleRate(mBlockAdapter.IsResampling() ? juce::roundToInt(deviceSampleRate) : 0);
    }
 
    void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
@@ -188,8 +277,53 @@ public:
                                          const AudioIODeviceCallbackContext& context) override
    {
       ignoreUnused(context);
+#if BESPOKE_IOS
+      ++mAudioCallbackCount;
+      mLastCallbackSize = numSamples;
+#endif
+#if BESPOKE_ANDROID
+      mAudioPerformanceHint.BeginCallback(numSamples, mDeviceSampleRate);
+      struct EndHint
+      {
+         AndroidSupport::AudioThreadPerformanceHint& hint;
+         ~EndHint() { hint.EndCallback(); }
+      } endHint{ mAudioPerformanceHint }; //at every return below
+#endif
+
+      //when the device delivers a block size other than what we asked for, or runs at a different sample rate,
+      //regroup (and resample) into fixed blocks. once it's delivered the right size at the right rate for a while,
+      //go back to processing directly, to drop the adapter's latency
+      const int blockSize = gBufferSize / UserPrefs.oversampling.Get();
+      if (numSamples != blockSize || mBlockAdapter.IsResampling())
+      {
+         mMatchingCallbackCount = 0;
+         if (!mUseBlockAdapter && mBlockAdapter.IsPrepared())
+            mUseBlockAdapter = true;
+      }
+      else if (mUseBlockAdapter && ++mMatchingCallbackCount > kCallbacksBeforeAdapterBypass)
+      {
+         mUseBlockAdapter = false;
+         mBlockAdapter.Reset(); //drops any audio still buffered in the adapter: a single short discontinuity at the switch
+      }
+
+      if (mUseBlockAdapter)
+      {
+         mBlockAdapter.Process(inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples,
+                               [this, numInputChannels, numOutputChannels](const float* const* input, float* const* output, int blockSize)
+                               {
+                                  mSynth.AudioIn(input, blockSize, numInputChannels);
+                                  mSynth.AudioOut(output, blockSize, numOutputChannels);
+                               });
+         return;
+      }
+
       mSynth.AudioIn(inputChannelData, numSamples, numInputChannels);
       mSynth.AudioOut(outputChannelData, numSamples, numOutputChannels);
+   }
+
+   void audioDeviceError(const String& errorMessage) override
+   {
+      ofLog() << "audioDeviceError(): " << errorMessage.toStdString();
    }
 
    void audioDeviceStopped() override
@@ -220,9 +354,16 @@ public:
             printf("Could not init nanovg.\n");
       }
       gNanoVG = gNanoVGRenderContexts[(int)NanoVGRenderContext::Main];
+      ++gNanoVGContextGeneration;
 
       mSynth.LoadResources();
       Push2Control::CreateStaticFramebuffer();
+
+      //the GL context can be destroyed and recreated while the app runs (android does this every time the app goes to
+      //the background and comes back). when that happens, only the GL resources above need to be recreated
+      if (mHasInitialized)
+         return;
+      mHasInitialized = true;
 
       /*for (auto deviceType : mGlobalManagers.mDeviceManager.getAvailableDeviceTypes())
       {
@@ -252,23 +393,52 @@ public:
       if (audioError.isEmpty())
       {
          auto loadedSetup = mGlobalManagers.mDeviceManager.getAudioDeviceSetup();
+#if BESPOKE_MOBILE
+         if (loadedSetup.sampleRate != gSampleRate / UserPrefs.oversampling.Get())
+         {
+            //iOS hardware may not support the requested rate (and what it supports varies by output route), so use the closest available rate
+            double requestedRate = gSampleRate / UserPrefs.oversampling.Get();
+            if (auto* device = mGlobalManagers.mDeviceManager.getCurrentAudioDevice())
+            {
+               double closestRate = loadedSetup.sampleRate;
+               for (double rate : device->getAvailableSampleRates())
+               {
+                  if (std::abs(rate - requestedRate) < std::abs(closestRate - requestedRate))
+                     closestRate = rate;
+               }
+
+               if (closestRate != loadedSetup.sampleRate)
+               {
+                  auto setup = loadedSetup;
+                  setup.sampleRate = closestRate;
+                  mGlobalManagers.mDeviceManager.setAudioDeviceSetup(setup, true);
+                  loadedSetup = mGlobalManagers.mDeviceManager.getAudioDeviceSetup();
+               }
+            }
+
+            ofLog() << "couldn't use sample rate " << requestedRate << ", using " << loadedSetup.sampleRate << " instead";
+            SetGlobalSampleRateAndBufferSize(roundToInt(loadedSetup.sampleRate), gBufferSize / UserPrefs.oversampling.Get());
+         }
+#endif
          if (outputDevice != kAutoDevice && outputDevice != kNoneDevice &&
              loadedSetup.outputDeviceName.toStdString() != outputDevice)
          {
             mSynth.SetFatalError("error setting output device to '" + outputDevice + "', fix this in userprefs.json (use \"auto\" for default device)" +
                                  "\n\n\nvalid devices:\n" + GetAudioDevices());
          }
-         else if (inputDevice != kAutoDevice && inputDevice != kNoneDevice &&
+         else if (inputDevice != kAutoDevice && inputDevice != kNoneDevice && HasMicrophonePermission() &&
                   loadedSetup.inputDeviceName.toStdString() != inputDevice)
          {
             mSynth.SetFatalError("error setting input device to '" + inputDevice + "', fix this in userprefs.json (use \"auto\" for default device, or \"none\" for no device)" +
                                  "\n\n\nvalid devices:\n" + GetAudioDevices());
          }
+#if !BESPOKE_MOBILE //iOS treats buffer size as a hint, and mBlockAdapter handles any mismatch
          else if (loadedSetup.bufferSize != gBufferSize / UserPrefs.oversampling.Get())
          {
             mSynth.SetFatalError("error setting buffer size to " + ofToString(gBufferSize / UserPrefs.oversampling.Get()) + " on device '" + loadedSetup.outputDeviceName.toStdString() + "', fix this in userprefs.json" +
                                  "\n\n(a valid buffer size might be: " + ofToString(loadedSetup.bufferSize) + ")");
          }
+#endif
          else if (loadedSetup.sampleRate != gSampleRate / UserPrefs.oversampling.Get())
          {
             mSynth.SetFatalError("error setting sample rate to " + ofToString(gSampleRate / UserPrefs.oversampling.Get()) + " on device '" + loadedSetup.outputDeviceName.toStdString() + "', fix this in userprefs.json" +
@@ -277,11 +447,15 @@ public:
          else
          {
             ofLog() << "output: " << loadedSetup.outputDeviceName << "   input: " << loadedSetup.inputDeviceName;
+#if BESPOKE_IOS
+            if (auto* display = Desktop::getInstance().getDisplays().getPrimaryDisplay())
+               ofLog() << "safe area insets: left " << display->safeAreaInsets.getLeft() << "  right " << display->safeAreaInsets.getRight() << "  top " << display->safeAreaInsets.getTop() << "  bottom " << display->safeAreaInsets.getBottom();
+#endif
 
-            int numInputChannels = loadedSetup.inputChannels.countNumberOfSetBits();
-            int numOutputChannels = loadedSetup.outputChannels.countNumberOfSetBits();
-
-            mSynth.InitIOBuffers(numInputChannels, numOutputChannels);
+            PrepareForAudioSetup(loadedSetup);
+#if BESPOKE_IOS
+            IOSAudioSession::RequestExactBufferSize(loadedSetup.sampleRate, gBufferSize / UserPrefs.oversampling.Get());
+#endif
          }
       }
       else
@@ -321,7 +495,12 @@ public:
    std::string GetInputDeviceName() const
    {
       std::string inputDevice = UserPrefs.audio_input_device.Get();
+#if BESPOKE_MOBILE
+      //iOS also has a single combined device, but keep "none" so we don't open (and prompt for) the microphone
+      if (inputDevice != kNoneDevice && !mGlobalManagers.mDeviceManager.getCurrentDeviceTypeObject()->hasSeparateInputsAndOutputs())
+#else
       if (!mGlobalManagers.mDeviceManager.getCurrentDeviceTypeObject()->hasSeparateInputsAndOutputs())
+#endif
          inputDevice = GetOutputDeviceName(); //asio must have identical input and output
       return inputDevice;
    }
@@ -331,6 +510,50 @@ public:
       return UserPrefs.audio_output_device.Get();
    }
 
+#if BESPOKE_ANDROID
+   //android devices only accept buffer sizes that are multiples of their burst size, and JUCE falls back to a 40ms buffer
+   //for anything else. the burst size JUCE measures depends on whether the device is already open (exclusive vs shared
+   //streams), so this has to run while it's closed, which is also the state JUCE checks the size in when opening it.
+   //returns the smallest supported size that fits one block: callbacks arrive a burst at a time either way, and
+   //mBlockAdapter regroups them into blocks
+   int ChooseAndroidDeviceBufferSize(int blockSize)
+   {
+      if (mGlobalManagers.mDeviceManager.getCurrentAudioDevice() != nullptr)
+         return mAndroidDeviceBufferSize;
+
+      auto& types = mGlobalManagers.mDeviceManager.getAvailableDeviceTypes();
+      if (types.isEmpty())
+         return 0;
+      AudioIODeviceType* type = types[0];
+      for (auto* candidate : types)
+      {
+         if (candidate->getTypeName() == mGlobalManagers.mDeviceManager.getCurrentAudioDeviceType())
+            type = candidate;
+      }
+      type->scanForDevices();
+      auto outputNames = type->getDeviceNames(false);
+      String outputName = outputNames[jmax(0, type->getDefaultDeviceIndex(false))];
+      std::unique_ptr<AudioIODevice> device(type->createDevice(outputName, {}));
+      if (device == nullptr)
+      {
+         ofLog() << "android audio: couldn't create device '" << outputName << "' to check buffer sizes";
+         return 0;
+      }
+
+      auto availableSizes = device->getAvailableBufferSizes();
+      int bestSize = 0;
+      for (int size : availableSizes)
+      {
+         if (size >= blockSize && (bestSize == 0 || size < bestSize))
+            bestSize = size;
+      }
+      if (bestSize == 0 && !availableSizes.isEmpty())
+         bestSize = availableSizes.getLast();
+
+      return bestSize;
+   }
+#endif
+
    AudioDeviceManager::AudioDeviceSetup GetPreferredSetupOptions() const
    {
       std::string inputDevice = GetInputDeviceName();
@@ -338,6 +561,10 @@ public:
       AudioDeviceManager::AudioDeviceSetup preferredSetupOptions;
       preferredSetupOptions.sampleRate = gSampleRate / UserPrefs.oversampling.Get();
       preferredSetupOptions.bufferSize = gBufferSize / UserPrefs.oversampling.Get();
+#if BESPOKE_ANDROID
+      if (mAndroidDeviceBufferSize > 0)
+         preferredSetupOptions.bufferSize = mAndroidDeviceBufferSize;
+#endif
       if (outputDevice != kAutoDevice && outputDevice != kNoneDevice)
          preferredSetupOptions.outputDeviceName = outputDevice;
       if (inputDevice != kAutoDevice && inputDevice != kNoneDevice)
@@ -349,6 +576,9 @@ public:
    {
       std::string inputDevice = GetInputDeviceName();
       std::string outputDevice = GetOutputDeviceName();
+#if BESPOKE_ANDROID
+      mAndroidDeviceBufferSize = ChooseAndroidDeviceBufferSize(gBufferSize / UserPrefs.oversampling.Get());
+#endif
       AudioDeviceManager::AudioDeviceSetup preferredSetupOptions = GetPreferredSetupOptions();
 
       int inputChannels = UserPrefs.max_input_channels.Get();
@@ -359,6 +589,14 @@ public:
       if (outputDevice == kNoneDevice)
          outputChannels = 0;
 
+      //opening the input fails without the user's permission, so until there is permission, open just the output,
+      //and ask for it. if the user allows it, the device is reopened with the input
+      if (inputChannels > 0 && !HasMicrophonePermission())
+      {
+         inputChannels = 0;
+         RequestMicrophonePermission();
+      }
+
       String audioError = mGlobalManagers.mDeviceManager.initialise(inputChannels,
                                                                     outputChannels,
                                                                     nullptr,
@@ -368,6 +606,69 @@ public:
 
       return audioError;
    }
+
+   //sets bespoke up for the channels and sample rate the audio device opened with. the device is already running
+   void PrepareForAudioSetup(const AudioDeviceManager::AudioDeviceSetup& setup)
+   {
+      int numInputChannels = setup.inputChannels.countNumberOfSetBits();
+      int numOutputChannels = setup.outputChannels.countNumberOfSetBits();
+
+      //don't let the audio callback see half-prepared buffers or adapter
+      const juce::ScopedLock lock(mGlobalManagers.mDeviceManager.getAudioCallbackLock());
+      mSynth.InitIOBuffers(numInputChannels, numOutputChannels);
+      mBlockAdapter.Prepare(numInputChannels, numOutputChannels, gBufferSize / UserPrefs.oversampling.Get(), 8192);
+      UpdateBlockAdapterSampleRate(setup.sampleRate);
+   }
+
+   bool HasMicrophonePermission() const
+   {
+#if BESPOKE_ANDROID
+      return RuntimePermissions::isGranted(RuntimePermissions::recordAudio);
+#else
+      return true; //ios asks by itself when the input is opened, and desktops don't need permission
+#endif
+   }
+
+   void RequestMicrophonePermission()
+   {
+#if BESPOKE_ANDROID
+      if (mHasRequestedMicrophonePermission)
+         return; //only ask once per launch. after a denial, the user can allow it in android's app settings
+      mHasRequestedMicrophonePermission = true;
+
+      //the device can be opened from the GL thread, so ask from the message thread
+      MessageManager::callAsync([safeThis = Component::SafePointer<MainContentComponent>(this)]
+                                {
+                                   RuntimePermissions::request(RuntimePermissions::recordAudio, [safeThis](bool granted)
+                                                               {
+                                                                  if (safeThis != nullptr)
+                                                                     safeThis->OnMicrophonePermissionResult(granted);
+                                                               });
+                                });
+#endif
+   }
+
+#if BESPOKE_ANDROID
+   void OnMicrophonePermissionResult(bool granted)
+   {
+      if (!granted)
+      {
+         ofLog() << "microphone access wasn't allowed, so there's no audio input";
+         return;
+      }
+
+      String audioError = InitializeAudioDevice();
+      if (audioError.isNotEmpty())
+      {
+         ofLog() << "couldn't open the audio input: " << audioError;
+         return;
+      }
+
+      auto setup = mGlobalManagers.mDeviceManager.getAudioDeviceSetup();
+      PrepareForAudioSetup(setup);
+      ofLog() << "output: " << setup.outputDeviceName << "   input: " << setup.inputDeviceName;
+   }
+#endif
 
    bool HasDesiredAudioDevice()
    {
@@ -392,8 +693,16 @@ public:
 
    void shutdown() override
    {
+      //this also happens while the app runs, whenever the GL context is destroyed (on android, every time the app
+      //goes to the background, including while a file picker is up). the message thread keeps polling meanwhile, so
+      //clear the contexts out rather than leave them dangling, until initialise() recreates them
       for (int i = 0; i < (int)NanoVGRenderContext::Num; ++i)
-         nvgDeleteGLES2(gNanoVGRenderContexts[i]);
+      {
+         if (gNanoVGRenderContexts[i] != nullptr)
+            nvgDeleteGLES2(gNanoVGRenderContexts[i]);
+         gNanoVGRenderContexts[i] = nullptr;
+      }
+      gNanoVG = nullptr;
    }
 
    void SetStartupSaveStateFile(const juce::String& bskPath)
@@ -490,18 +799,155 @@ private:
       return 1;
    }
 
+   //touch navigation: in touch navigation mode, one finger pans the canvas and two fingers pan and pinch-zoom.
+   //outside of it, the first finger clicks as usual, but a second finger turns the gesture into a two-finger pan/zoom
+   struct NavigationTouch
+   {
+      int mSourceIndex{ 0 };
+      juce::Point<float> mPosition;
+   };
+
+   std::vector<NavigationTouch>::iterator FindNavigationTouch(const MouseEvent& e)
+   {
+      return std::find_if(mNavigationTouches.begin(), mNavigationTouches.end(), [&e](const NavigationTouch& touch)
+                          {
+                             return touch.mSourceIndex == e.source.getIndex();
+                          });
+   }
+
+   bool ShouldAlwaysClick(const MouseEvent& e)
+   {
+#if BESPOKE_IOS
+      if (IOSPointerInput::WasLastPressFromPointer()) //mice and trackpads have their own ways to scroll, so they always click
+         return true;
+#endif
+      return mSynth.ShouldTouchAlwaysClick(e.getMouseDownX(), e.getMouseDownY());
+   }
+
+   bool StartNavigationTouch(const MouseEvent& e)
+   {
+      bool alwaysClick = ShouldAlwaysClick(e);
+
+      //navigation mode, or joining a two-finger gesture that's already underway
+      if (!alwaysClick && (mSynth.IsTouchNavigationMode() || (e.source.isTouch() && !mNavigationTouches.empty())))
+      {
+         mNavigationTouches.push_back({ e.source.getIndex(), e.position });
+         return true;
+      }
+
+      if (!e.source.isTouch() || mClickTouch.mSourceIndex == -1)
+         return false;
+
+      //a second finger while the first is clicking
+      if (alwaysClick || mClickTouchAlwaysClicks)
+      {
+         mIgnoredTouches.push_back(e.source.getIndex()); //bespoke only handles one pointer, so leave the click alone
+         return true;
+      }
+
+      //turn it into a two-finger pan/zoom: end the first finger's click, and navigate with both
+      auto* clickSource = Desktop::getInstance().getMouseSource(mClickTouch.mSourceIndex);
+      mSynth.MouseReleased(mClickTouch.mPosition.x, mClickTouch.mPosition.y, 1, clickSource != nullptr ? *clickSource : e.source);
+      mNavigationTouches.push_back(mClickTouch);
+      mNavigationTouches.push_back({ e.source.getIndex(), e.position });
+      mClickTouch.mSourceIndex = -1;
+      return true;
+   }
+
+   bool IsIgnoredTouch(const MouseEvent& e) const
+   {
+      return std::find(mIgnoredTouches.begin(), mIgnoredTouches.end(), e.source.getIndex()) != mIgnoredTouches.end();
+   }
+
+   bool UpdateNavigationTouch(const MouseEvent& e)
+   {
+      auto it = FindNavigationTouch(e);
+      if (it == mNavigationTouches.end())
+         return false;
+
+      if (it - mNavigationTouches.begin() >= 2) //only the first two touches navigate
+      {
+         it->mPosition = e.position;
+         return true;
+      }
+
+      if (mNavigationTouches.size() == 1)
+      {
+         auto delta = e.position - it->mPosition;
+         it->mPosition = e.position;
+         mSynth.PanView(delta.x, delta.y);
+         return true;
+      }
+
+      auto& touchA = mNavigationTouches[0];
+      auto& touchB = mNavigationTouches[1];
+      auto oldCenter = (touchA.mPosition + touchB.mPosition) * .5f;
+      float oldDistance = touchA.mPosition.getDistanceFrom(touchB.mPosition);
+      it->mPosition = e.position;
+      auto newCenter = (touchA.mPosition + touchB.mPosition) * .5f;
+      float newDistance = touchA.mPosition.getDistanceFrom(touchB.mPosition);
+
+      mSynth.PanView(newCenter.x - oldCenter.x, newCenter.y - oldCenter.y);
+      if (oldDistance > 1 && newDistance > 1)
+         mSynth.MouseMagnify(newCenter.x, newCenter.y, newDistance / oldDistance, e.source);
+      return true;
+   }
+
+   bool EndNavigationTouch(const MouseEvent& e)
+   {
+      auto it = FindNavigationTouch(e);
+      if (it == mNavigationTouches.end())
+         return false;
+      mNavigationTouches.erase(it);
+      return true;
+   }
+
    void mouseDown(const MouseEvent& e) override
    {
+      if (StartNavigationTouch(e))
+         return;
+      if (e.source.isTouch())
+      {
+         mClickTouch = { e.source.getIndex(), e.position };
+         mClickTouchAlwaysClicks = ShouldAlwaysClick(e);
+#if BESPOKE_IOS
+         mClickTouchIsPointer = IOSPointerInput::WasLastPressFromPointer();
+#endif
+      }
       mSynth.MousePressed(e.getMouseDownX(), e.getMouseDownY(), GetMouseButton(e), e.source);
    }
 
    void mouseUp(const MouseEvent& e) override
    {
+      if (EndNavigationTouch(e))
+         return;
+      if (IsIgnoredTouch(e))
+      {
+         mIgnoredTouches.erase(std::find(mIgnoredTouches.begin(), mIgnoredTouches.end(), e.source.getIndex()));
+         return;
+      }
+      if (e.source.isTouch())
+      {
+         if (e.source.getIndex() != mClickTouch.mSourceIndex)
+            return;
+         mClickTouch.mSourceIndex = -1;
+#if BESPOKE_IOS
+         mClickTouchIsPointer = false;
+#endif
+      }
       mSynth.MouseReleased(e.getPosition().x, e.getPosition().y, GetMouseButton(e), e.source);
    }
 
    void mouseDrag(const MouseEvent& e) override
    {
+      if (UpdateNavigationTouch(e) || IsIgnoredTouch(e))
+         return;
+      if (e.source.isTouch())
+      {
+         if (e.source.getIndex() != mClickTouch.mSourceIndex)
+            return;
+         mClickTouch.mPosition = e.position;
+      }
       mSynth.MouseDragged(e.getPosition().x, e.getPosition().y, GetMouseButton(e), e.source);
    }
 
@@ -513,8 +959,15 @@ private:
 
    void mouseWheelMove(const MouseEvent& e, const MouseWheelDetails& wheel) override
    {
+#if BESPOKE_IOS
+      //juce can't report this on iOS, and iOS doesn't expose the natural scrolling setting. natural is the default there
+      bool isReversed = true;
+#else
+      bool isReversed = wheel.isReversed;
+#endif
+
       float invert = 1;
-      if (wheel.isReversed)
+      if (isReversed)
          invert = -1;
 
       float scale = 6;
@@ -522,7 +975,7 @@ private:
          scale = 30;
 
       if (!wheel.isInertial)
-         mSynth.MouseScrolled(wheel.deltaX * scale, wheel.deltaY * scale * invert, wheel.isSmooth, wheel.isReversed, true);
+         mSynth.MouseScrolled(wheel.deltaX * scale, wheel.deltaY * scale * invert, wheel.isSmooth, isReversed, true);
    }
 
    void mouseMagnify(const MouseEvent& e, float scaleFactor) override
@@ -557,28 +1010,104 @@ private:
       }
 #endif
 
+      const bool isComposedCharacter = IsComposedCharacter(key);
       int keyCode = key.getTextCharacter();
-      if (keyCode < 32 || key.getModifiers().isAltDown())
+      if (keyCode < 32 || (key.getModifiers().isAltDown() && !isComposedCharacter))
          keyCode = key.getKeyCode();
       bool isRepeat = true;
-      if (find(mPressedKeys.begin(), mPressedKeys.end(), keyCode) == mPressedKeys.end())
+      auto pressed = std::find_if(mPressedKeys.begin(), mPressedKeys.end(), [keyCode](const PressedKey& pressedKey)
+                                  {
+                                     return pressedKey.mKeyCode == keyCode;
+                                  });
+      if (pressed == mPressedKeys.end())
       {
-         mPressedKeys.push_back(keyCode);
+         //remember the physical key too, since a typed character like '@' doesn't map back to the key that is held
+         mPressedKeys.push_back({ keyCode, key.getKeyCode() });
          isRepeat = false;
       }
+      //the modifiers were used to type the character, so they shouldn't also be treated as a shortcut chord
+      SetIgnoreCharacterModifiers(isComposedCharacter);
       mSynth.KeyPressed(keyCode, isRepeat);
+      SetIgnoreCharacterModifiers(false);
       return true;
    }
+
+   //many non-us layouts type characters such as ~ \ @ [ ] with a modifier. when that happens, the typed character is
+   //what was meant, not the physical key
+   static bool IsComposedCharacter(const KeyPress& key)
+   {
+      const ModifierKeys mods = key.getModifiers();
+      const juce_wchar typed = key.getTextCharacter();
+      if (!mods.isAltDown() || typed < 32)
+         return false;
+#if BESPOKE_WINDOWS
+      //windows reports AltGr as Ctrl+Alt
+      return mods.isCtrlDown();
+#elif BESPOKE_MAC
+      //option types non-ascii symbols on a us layout too, so only take plain ascii, so that alt+key shortcuts
+      //like hotbinding with alt+number keep working there
+      return !mods.isCommandDown() && !mods.isCtrlDown() && typed < 127;
+#else
+      return false;
+#endif
+   }
+
+#if BESPOKE_MOBILE
+   //TextInputTarget
+   //bespoke's text fields do their own editing from key presses, so rather than exposing their contents to iOS, this
+   //pretends to be a one-character field with the caret after the character, and turns iOS's edits into key presses:
+   //deleting a range becomes backspaces, and inserting text becomes typed characters
+   static constexpr int kFakeCaretPosition = 1;
+
+   bool isTextInputActive() const override { return IKeyboardFocusListener::GetActiveKeyboardFocus() != nullptr; }
+   Range<int> getHighlightedRegion() const override { return mTextInputHighlight; }
+   void setHighlightedRegion(const Range<int>& newRange) override { mTextInputHighlight = newRange; }
+   void setTemporaryUnderlining(const Array<Range<int>>&) override {}
+   String getTextInRange(const Range<int>& range) const override { return String::repeatedString(" ", range.getLength()); }
+   int getCaretPosition() const override { return mTextInputHighlight.getStart(); }
+   Rectangle<int> getCaretRectangleForCharIndex(int) const override { return {}; }
+   int getTotalNumChars() const override { return kFakeCaretPosition; }
+   int getCharIndexForPoint(Point<int>) const override { return kFakeCaretPosition; }
+   RectangleList<int> getTextBounds(Range<int>) const override { return {}; }
+
+   void insertTextAtCaret(const String& textToInsert) override
+   {
+      for (int i = 0; i < mTextInputHighlight.getLength(); ++i)
+         SendTypedKey(KeyPress::backspaceKey);
+      for (auto character : textToInsert)
+         SendTypedKey((int)character);
+      mTextInputHighlight = { kFakeCaretPosition, kFakeCaretPosition };
+   }
+
+   VirtualKeyboardType getKeyboardType() override
+   {
+      if (auto* textEntry = dynamic_cast<TextEntry*>(IKeyboardFocusListener::GetActiveKeyboardFocus()))
+      {
+         if (textEntry->GetTextEntryType() == kTextEntry_Int)
+            return numericKeyboard;
+         if (textEntry->GetTextEntryType() == kTextEntry_Float)
+            return decimalKeyboard;
+      }
+      return textKeyboard;
+   }
+
+   void SendTypedKey(int keyCode)
+   {
+      mSynth.KeyPressed(keyCode, false);
+      mSynth.KeyReleased(keyCode);
+   }
+#endif
 
    bool keyStateChanged(bool isKeyDown) override
    {
       if (!isKeyDown)
       {
-         for (int keyCode : mPressedKeys)
+         for (auto iter = mPressedKeys.begin(); iter != mPressedKeys.end(); ++iter)
          {
-            if (!KeyPress::isKeyCurrentlyDown(keyCode))
+            if (!KeyPress::isKeyCurrentlyDown(iter->mPhysicalKeyCode))
             {
-               mPressedKeys.remove(keyCode);
+               int keyCode = iter->mKeyCode;
+               mPressedKeys.erase(iter);
                mSynth.KeyReleased(keyCode);
                break;
             }
@@ -645,11 +1174,41 @@ private:
 
    int64 mLastFpsUpdateTime;
    int mFrameCountAccum;
-   std::list<int> mPressedKeys;
+   struct PressedKey
+   {
+      int mKeyCode{ 0 };
+      int mPhysicalKeyCode{ 0 };
+   };
+   std::list<PressedKey> mPressedKeys;
    double mPixelRatio;
    juce::Point<int> mScreenPosition;
    juce::Point<int> mDesiredInitialPosition;
    SpaceMouseMessageWindow mSpaceMouseReader;
+   FixedBlockAudioAdapter mBlockAdapter;
+   std::atomic<bool> mUseBlockAdapter{ false };
+#if BESPOKE_MOBILE
+   bool mWasTextInputActive{ false };
+   bool mClickTouchIsPointer{ false }; //mClickTouch is a mouse or trackpad press
+   Range<int> mTextInputHighlight{ kFakeCaretPosition, kFakeCaretPosition };
+#endif
+   int mMatchingCallbackCount{ 0 }; //audio thread only
+   static constexpr int kCallbacksBeforeAdapterBypass = 100; //~0.5s at 256 samples / 48k, avoids flip-flopping
+   std::vector<NavigationTouch> mNavigationTouches;
+   NavigationTouch mClickTouch{ -1, {} }; //the touch currently acting as the mouse, if any (bespoke only handles one pointer)
+   bool mClickTouchAlwaysClicks{ false };
+   std::vector<int> mIgnoredTouches; //extra touches that bespoke can't handle while a click is underway
+   bool mHasInitialized{ false }; //initialise() has run once, see there
+#if BESPOKE_ANDROID
+   int mAndroidDeviceBufferSize{ 0 }; //see ChooseAndroidDeviceBufferSize()
+   double mDeviceSampleRate{ 0 }; //for mAudioPerformanceHint, set in audioDeviceAboutToStart()
+   bool mHasRequestedMicrophonePermission{ false };
+   AndroidSupport::AudioThreadPerformanceHint mAudioPerformanceHint;
+#endif
+#if BESPOKE_IOS
+   std::atomic<int> mAudioCallbackCount{ 0 };
+   std::atomic<int> mLastCallbackSize{ 0 };
+   double mLastBufferSizeRequestTime{ 0 };
+#endif
 
    enum class AudioDeviceConnectionState
    {
